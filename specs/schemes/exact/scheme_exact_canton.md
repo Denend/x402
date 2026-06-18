@@ -57,7 +57,7 @@ signing; the facilitator, acting as `delegate`, exercises `TransferCommand_Send`
   "scheme": "exact",
   "network": "canton:mainnet",
   "amount": "0.1000000000",
-  "asset": "canton-coin",
+  "asset": "CC",
   "payTo": "merchant_party::1220abc...",
   "maxTimeoutSeconds": 60,
   "extra": {
