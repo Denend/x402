@@ -62,7 +62,7 @@ signing; the facilitator, acting as `delegate`, exercises `TransferCommand_Send`
   "maxTimeoutSeconds": 60,
   "extra": {
     "assetTransferMethod": "external-party-amulet-rules",
-    "facilitatorParty": "ftp_facilitator::1220def...",
+    "feePayer": "ftp_facilitator::1220def...",
     "synchronizerId": "global-domain::1220xyz...",
     "merchantContractCid": "00mc..."
   }
