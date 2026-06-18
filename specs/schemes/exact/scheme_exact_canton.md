@@ -8,7 +8,7 @@ signing; the facilitator, acting as `delegate`, exercises `TransferCommand_Send`
 
 ## Scheme Name
 
-`exact-canton`
+`exact`
 
 ## Networks
 
