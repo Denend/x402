@@ -1,4 +1,4 @@
-# Exact Payment Scheme for Canton Network (`exact-canton`)
+# Exact Payment Scheme for Canton Network (`exact`)
 
 This document specifies the `exact-canton` payment scheme for the x402 protocol
 on Canton Network. The client creates a
