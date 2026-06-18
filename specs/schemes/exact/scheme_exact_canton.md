@@ -54,7 +54,7 @@ signing; the facilitator, acting as `delegate`, exercises `TransferCommand_Send`
 
 ```json
 {
-  "scheme": "exact-canton",
+  "scheme": "exact",
   "network": "canton:mainnet",
   "amount": "0.1000000000",
   "asset": "canton-coin",
