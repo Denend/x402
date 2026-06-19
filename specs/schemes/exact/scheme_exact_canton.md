@@ -75,7 +75,7 @@ signing; the facilitator, acting as `delegate`, exercises `TransferCommand_Send`
 - `asset`: `"CC"`. This transfer method settles Canton Coin only.
 - `payTo`: Receiver party id in canonical form `"<name>::<fingerprint>"`.
 - `extra.assetTransferMethod`: MUST be `"external-party-amulet-rules"`.
-- `extra.facilitatorParty`: The facilitator's Canton party id. MUST be set as
+- `extra.feePayer`: The facilitator's Canton party id. MUST be set as
   `delegate` in the `TransferCommand`. Clients MUST NOT alter this value.
 - `extra.synchronizerId`: The Global Synchronizer the transfer settles on.
 - `extra.merchantContractCid` (optional): When present, the facilitator
