@@ -107,7 +107,7 @@ signing; the facilitator, acting as `delegate`, exercises `TransferCommand_Send`
   "payload": {
     "transferMethod": "external-party-amulet-rules",
     "transferCommandCid": "00abc...",
-    "payerParty": "agent_party::1220...",
+    "payer": "agent_party::1220...",
     "nonce": 42
   }
 }
