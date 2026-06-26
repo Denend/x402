@@ -1,10 +1,11 @@
 # Exact Payment Scheme for Canton Network (`exact`)
 
 This document specifies the `exact` payment scheme for the x402 protocol
-on Canton Network. The client creates a
-`Splice.ExternalPartyAmuletRules.TransferCommand` via Ed25519 external-party
-signing; the facilitator, acting as `delegate`, exercises `TransferCommand_Send`
-— submitting the transaction and sponsoring sequencer traffic.
+on Canton Network. The client creates an `AmuletAllocation` (CIP-56 Token
+Standard) naming the merchant as receiver and the facilitator as settlement
+executor; the facilitator exercises `DirectSettlementConsent_Execute` —
+moving Canton Coin atomically and directly to the merchant in a single
+facilitator-submitted transaction. No escrow, no facilitator custody.
 
 ## Scheme Name
 
@@ -19,36 +20,48 @@ signing; the facilitator, acting as `delegate`, exercises `TransferCommand_Send`
 
 ## Protocol Flow
 
-1. **Client** requests a resource from the **Resource Server**.
-2. **Resource Server** responds with a 402 containing `PaymentRequirements`.
-   The `extra` field includes `feePayer` (the delegate that will
-   execute the transfer) and `synchronizerId`.
-3. **Client** reads its next nonce from SV Scan:
-   `GET /api/scan/v0/transfer-command-counters/{party}`. First payment from
-   a new party defaults to nonce `0`.
-4. **Client** exercises `ExternalPartyAmuletRules_CreateTransferCommand` via
-   interactive submission on its own participant:
-   - `POST /v2/interactive-submission/prepare` → `preparedTransactionHash`
-   - Client signs the hash with its Ed25519 key
-   - `POST /v2/interactive-submission/execute` with the signature
-5. **Client** locates the created `TransferCommand` in its ACS by matching
-   `(sender, nonce)` and extracts the `transferCommandCid`.
-6. **Client** retries the original request with a `PAYMENT-SIGNATURE` header
-   containing the `transferCommandCid`, `payer`, and `nonce`.
-7. **Resource Server** forwards the payload to the facilitator's `/verify`.
-8. **Facilitator** reads the `TransferCommand` by `cid` from ACS (it is a
-   stakeholder as `delegate`), reads the sender's `TransferCommandCounter`
-   from Scan, and validates the command against `PaymentRequirements`.
-9. **Facilitator** returns `VerifyResponse` to the **Resource Server**.
-10. **Resource Server** forwards the payload to the facilitator's `/settle`.
-11. **Facilitator** re-verifies, fetches `AmuletRules`, `OpenMiningRound`,
-    `IssuingMiningRounds`, and `TransferCommandCounter` from SV Scan as
-    disclosed contracts, then exercises `TransferCommand_Send`. The ledger
-    atomically moves Canton Coin from sender to receiver and archives the
-    `TransferCommand`.
-12. **Facilitator** returns `SettlementResponse` with the ledger `updateId`.
-13. **Resource Server** grants the **Client** access and echoes settlement
-    metadata in the `PAYMENT-RESPONSE` header.
+Two transactions settle each payment:
+
+- **Tx 1 (client):** `AllocationFactory_Allocate` — locks the sender's
+  Canton Coin into an `AmuletAllocation` with `receiver = merchant` and
+  `settlement.executor = facilitator`.
+- **Tx 2 (facilitator):** `DirectSettlementConsent_Execute` — the facilitator
+  alone exercises a standing both-party consent, which runs
+  `Allocation_ExecuteTransfer` and pays the merchant directly.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant R as Resource Server
+    participant F as Facilitator
+    participant L as Canton Ledger
+
+    C->>R: GET /resource
+    R->>C: 402 Payment Required (PAYMENT-REQUIRED header)
+    C->>L: AllocationFactory_Allocate<br/>(receiver=merchant, executor=facilitator)
+    C->>R: GET /resource + PAYMENT-SIGNATURE (allocationCid, payer)
+    R->>F: POST /verify
+    F->>L: read AmuletAllocation from ACS
+    F-->>R: VerifyResponse (valid)
+    R->>F: POST /settle
+    F->>L: DirectSettlementConsent_Execute(allocationCid)
+    L-->>F: updateId
+    F-->>R: SettlementResponse (updateId)
+    R->>C: 200 + PAYMENT-RESPONSE
+```
+
+## Merchant Onboarding
+
+Before receiving the first payment, the merchant MUST create a
+`MerchantConsent {merchant, facilitator}` contract on the Canton ledger
+once-total. This grants the facilitator standing authority to mint the
+both-party `DirectSettlementConsent` on demand.
+
+The sender's `SenderConsent {sender, facilitator}` is created automatically
+by the client wallet relay on the first payment attempt. After both consents
+exist, the facilitator mints a `DirectSettlementConsent {sender, merchant,
+facilitator}` once per (sender, merchant) pair; it is reused for all
+subsequent payments between that pair.
 
 ## `PaymentRequirements` for `exact`
 
@@ -61,29 +74,43 @@ signing; the facilitator, acting as `delegate`, exercises `TransferCommand_Send`
   "payTo": "merchant_party::1220abc...",
   "maxTimeoutSeconds": 60,
   "extra": {
-    "assetTransferMethod": "external-party-amulet-rules",
+    "assetTransferMethod": "allocation-direct",
     "feePayer": "ftp_facilitator::1220def...",
     "synchronizerId": "global-domain::1220xyz...",
-    "merchantContractCid": "00mc...",
+    "allocationFactoryCid": "00abc...",
+    "allocationFactoryTemplateId": "0000abc...",
+    "instrumentId": { "admin": "DSO::1220...", "id": "Amulet" },
+    "executor": "ftp_facilitator::1220def...",
+    "allocateBeforeSeconds": 30,
+    "settleBeforeSeconds": 60,
     "memo": "invoice-2024-001"
   }
 }
 ```
 
-- `amount`: Integer string representing atomic units (1 CC = 10^10 units).
-  `"1000000000"` = 0.1 CC, `"10000000000"` = 1 CC. Must match exactly (string
-  equality) what the Daml contract encodes.
-- `asset`: `"CC"`. This transfer method settles Canton Coin only.
-- `payTo`: Receiver party id in canonical form `"<name>::<fingerprint>"`.
-- `extra.assetTransferMethod`: MUST be `"external-party-amulet-rules"`.
-- `extra.feePayer`: The facilitator's Canton party id. MUST be set as
-  `delegate` in the `TransferCommand`. Clients MUST NOT alter this value.
+- `amount`: Integer string of atomic units (1 CC = 10¹⁰ units).
+  `"1000000000"` = 0.1 CC. Must match exactly what the ledger records.
+- `asset`: `"CC"`. Settles Canton Coin only.
+- `payTo`: Merchant's Canton party id `"<name>::<fingerprint>"`.
+- `extra.assetTransferMethod`: MUST be `"allocation-direct"`.
+- `extra.feePayer`: The facilitator's Canton party id. Equals `executor`.
+  Clients MUST NOT alter this value.
 - `extra.synchronizerId`: The Global Synchronizer the transfer settles on.
-- `extra.merchantContractCid` (optional): When present, the facilitator
-  verifies the merchant is registered before accepting the payment.
+- `extra.allocationFactoryCid`: Contract id of the CIP-56 `AllocationFactory`
+  the client exercises to create the `AmuletAllocation`.
+- `extra.allocationFactoryTemplateId`: Hash-prefixed template id of the
+  `AllocationFactory` (used by the client to verify the resolved factory).
+- `extra.instrumentId`: The Canton Coin instrument identifier
+  `{ "admin": "<DSO-party>", "id": "Amulet" }`.
+- `extra.executor`: The facilitator's Canton party id (= `feePayer`). Set as
+  `settlement.executor` in the `AmuletAllocation`.
+- `extra.allocateBeforeSeconds`: Relative deadline (seconds from request time)
+  the client uses to compute the absolute `allocateBefore` timestamp in the
+  allocation.
+- `extra.settleBeforeSeconds`: Relative deadline for `settleBefore`. MUST be
+  strictly after `allocateBefore`.
 - `extra.memo` (optional): Seller-defined UTF-8 string, max 256 bytes. When
-  present, the client MUST set `TransferCommand.description` to this exact
-  value. No facilitator-side matching required.
+  present, the client MUST include it in the allocation's settlement metadata.
 
 ## `PaymentPayload` `payload` Field
 
@@ -103,28 +130,27 @@ signing; the facilitator, acting as `delegate`, exercises `TransferCommand_Send`
     "payTo": "merchant_party::1220abc...",
     "maxTimeoutSeconds": 60,
     "extra": {
-      "assetTransferMethod": "external-party-amulet-rules",
+      "assetTransferMethod": "allocation-direct",
       "feePayer": "ftp_facilitator::1220def...",
       "synchronizerId": "global-domain::1220xyz...",
       "memo": "invoice-2024-001"
     }
   },
   "payload": {
-    "transferMethod": "external-party-amulet-rules",
-    "transferCommandCid": "00abc...",
+    "transferMethod": "allocation-direct",
+    "allocationCid": "00abc...",
     "payer": "agent_party::1220...",
-    "nonce": 42
+    "directConsentCid": "00def..."
   }
 }
 ```
 
-- `transferCommandCid`: Contract id of the `TransferCommand` created by the
-  client on-ledger.
-- `payer`: The client's Canton party id (`TransferCommand.sender`).
-- `nonce`: The monotonic nonce used when creating the `TransferCommand`.
-
-`TransferCommand.description` carries `extra.memo` verbatim when set.
-When `extra.memo` is absent, the client MAY leave `description` empty.
+- `allocationCid`: Contract id of the completed `AmuletAllocation` created
+  by the client. The facilitator reads this from its participant ACS.
+- `payer`: The client's Canton party id (`allocation.transferLeg.sender`).
+- `directConsentCid` (optional): The standing `DirectSettlementConsent` cid
+  for the (sender, merchant) pair. When present the facilitator uses it
+  directly; when absent the facilitator resolves it from ACS.
 
 ## `SettlementResponse`
 
@@ -137,8 +163,9 @@ When `extra.memo` is absent, the client MAY leave `description` empty.
 }
 ```
 
-`transaction` is the Canton ledger `updateId` of the `TransferCommand_Send`
-exercise. Resolvable in any SV Scan API as proof of settlement.
+`transaction` is the Canton ledger `updateId` of the
+`DirectSettlementConsent_Execute` exercise. Resolvable in any SV Scan API as
+proof of settlement.
 
 On failure:
 
@@ -155,120 +182,101 @@ On failure:
 1. **Network match.** `paymentRequirements.network` MUST equal the
    facilitator's configured network.
 
-2. **TransferCommand exists.** The facilitator MUST locate the
-   `TransferCommand` by `payload.transferCommandCid` in its ACS (it is an
-   observer as `delegate`). If absent or archived, reject with
-   `invalid_exact_canton_transfer_command_not_found`.
+2. **Proof present.** `payload.allocationCid` MUST be a non-empty string.
+   If only `allocationInstructionCid` is present, reject with
+   `invalid_exact_canton_allocation_pending`. If neither is present, reject
+   with `invalid_exact_canton_missing_proof`.
 
-3. **Delegate.** `TransferCommand.delegate` MUST equal `extra.feePayer`.
-   `TransferCommand.sender` MUST NOT equal `TransferCommand.delegate` (prevents
-   a payer from nominating itself as facilitator).
+3. **Allocation exists.** The facilitator MUST locate the `AmuletAllocation`
+   by `payload.allocationCid` from its participant ACS (it is an observer as
+   `settlement.executor`). If absent or archived, reject with
+   `invalid_exact_canton_allocation_not_found`.
 
-4. **Amount.** `TransferCommand.amount` MUST equal `PaymentRequirements.amount`
-   exactly (string comparison; no numeric coercion).
+4. **Executor.** `allocation.settlement.executor` MUST equal `extra.feePayer`.
+   Reject with `invalid_exact_canton_executor_mismatch`.
 
-5. **Expiry.** `TransferCommand.expiresAt` MUST be at least 5 seconds in the
-   future at verification time. Reject with `invalid_exact_canton_expired`.
+5. **Receiver.** `allocation.transferLeg.receiver` MUST equal
+   `paymentRequirements.payTo`. Reject with
+   `invalid_exact_canton_merchant_mismatch`.
 
-6. **Sender.** `TransferCommand.sender` MUST equal `payload.payer`.
+6. **Sender.** `allocation.transferLeg.sender` MUST equal `payload.payer`.
+   Reject with `invalid_exact_canton_payer_mismatch`.
 
-7. **Receiver.** `TransferCommand.receiver` MUST equal
-   `PaymentRequirements.payTo`.
+7. **Amount.** `allocation.transferLeg.amount` MUST equal
+   `paymentRequirements.amount` converted to on-ledger Decimal
+   (1 CC = 10¹⁰ atomic units). Reject with
+   `invalid_exact_canton_amount_mismatch`.
 
-8. **Nonce.** `TransferCommand.nonce` MUST be ≥ `nextNonce` from the sender's
-   `TransferCommandCounter` on SV Scan. A missing counter (first payment)
-   defaults to `nextNonce = 0`. Reject with
-   `invalid_exact_canton_nonce_reuse` if stale.
+8. **Instrument.** `allocation.transferLeg.instrumentId` MUST match Canton
+   Coin (`extra.instrumentId`). Reject with
+   `invalid_exact_canton_instrument_id_mismatch`.
 
-   **Protocol behavior:** `TransferCommand_Send` enforces strict sequential
-   execution on-chain. If `nonce == nextNonce` the choice executes and the
-   counter increments. If `nonce < nextNonce` the command is archived and
-   returns a failure (already spent). If `nonce > nextNonce` the ledger aborts
-   *without* archiving the counter — the `TransferCommand` remains live and
-   can be retried once the preceding nonces are settled (see
-   `ExternalPartyAmuletRules.daml`, `TransferCommand_Send`).[^nonce]
+9. **Deadline.** `allocation.settlement.allocateBefore` MUST be strictly
+   before `allocation.settlement.settleBefore`, and `settleBefore` MUST be
+   at least 5 seconds in the future at verification time. Reject with
+   `invalid_exact_canton_expired`.
 
-[^nonce]: `hyperledger-labs/splice`, `daml/splice-amulet/daml/Splice/ExternalPartyAmuletRules.daml`
-
-9. **Merchant registration** (when `extra.merchantContractCid` is present).
-    The referenced `MerchantContract` MUST be active and its `merchant` field
-    MUST equal `PaymentRequirements.payTo`. Reject with
-    `invalid_exact_canton_merchant_not_registered` otherwise.
+10. **Self-payment guard.** `payload.payer` MUST NOT equal `extra.feePayer`.
+    Reject with `invalid_exact_canton_self_payment`.
 
 ## Balance Check (SHOULD)
 
-`payer` is hosted on the facilitator's own participant (onboarded via the
-facilitator's relay), so its Amulet holdings are visible in local ACS — the
-facilitator SHOULD check `payer` holds ≥ `PaymentRequirements.amount`
-before returning a successful `VerifyResponse`, and reject with
-`invalid_exact_canton_insufficient_balance` if not. Not a full tx
-simulation: `PrepareSubmission` is an external-party-signing flow, not a
-dry-run API.
+The facilitator SHOULD verify the payer holds ≥ `paymentRequirements.amount`
+in Amulet on the facilitator's participant ACS before returning a successful
+`VerifyResponse`. Reject with `invalid_exact_canton_insufficient_balance` if
+the check fails.
 
 ## Duplicate Settlement Mitigation
 
-Canton provides native replay protection: `TransferCommand_Send` consumes
-(archives) the `TransferCommand` contract. A second `Send` on the same
-contract id fails at the ledger with `CONTRACT_NOT_FOUND`. No off-chain
-deduplication store is required.
+`Allocation_ExecuteTransfer` archives the `AmuletAllocation`. A second
+`DirectSettlementConsent_Execute` on the same `allocationCid` fails at the
+ledger with `CONTRACT_NOT_FOUND`. No off-chain deduplication store is
+required.
 
 ## Settlement
 
 After verification succeeds:
 
-1. Fetch in parallel from SV Scan:
-   - `AmuletRules` (contract + `created_event_blob`)
-   - Open and issuing mining rounds (contracts + `created_event_blob` for each)
-   - `TransferCommandCounter` for the payer (contract + `created_event_blob`)
+1. **Resolve consent.** If `payload.directConsentCid` is present, use it
+   directly. Otherwise look up `DirectSettlementConsent {sender, merchant,
+   facilitator}` from ACS. If no consent exists, mint it via
+   `MerchantConsent_Accept` (requires both `SenderConsent` and
+   `MerchantConsent` to be present on-ledger).
 
-2. Select the active `OpenMiningRound`: among rounds where `opensAt ≤ now`,
-   pick the highest `round.number`. Fall back to the highest overall if none
-   are open yet.
+2. **Resolve execute-transfer context** from SV Scan registry: instrument
+   config state, amulet rules, and active open round as disclosed contracts.
+   Read the live `AmuletAllocation` `created_event_blob` from participant ACS.
 
-3. Exercise `TransferCommand_Send` as `delegate`:
+3. **Exercise** `DirectSettlementConsent_Execute` with `allocationCid` and
+   the resolved context as `extraArgs`. The facilitator is the sole submitter
+   (`actAs: [facilitator]`); `Allocation_ExecuteTransfer` runs inside the
+   choice body using authority delegated by the both-party consent. The
+   facilitator funds nothing — the sender's locked Amulet is the source.
 
-   ```
-   choiceArgument = {
-     context: {
-       amuletRules: <AmuletRules contractId>,
-       context: {
-         openMiningRound: <active round contractId>,
-         issuingMiningRounds: [[{number: "N"}, <contractId>], ...],
-         validatorRights: [],
-         featuredAppRight: null
-       }
-     },
-     inputs: [],
-     transferCounterCid: <TransferCommandCounter contractId>
-   }
-   disclosedContracts: [AmuletRules, OpenMiningRound, TransferCommandCounter,
-                        ...IssuingMiningRounds]
-   ```
-
-4. **Stale counter retry.** If the ledger rejects with
-   `LOCAL_VERDICT_INACTIVE_CONTRACTS` (SV Scan counter cache lagging behind
-   the ledger), refresh the counter from Scan and retry up to 5 times with
-   exponential backoff starting at 500 ms. Return
-   `unexpected_canton_ledger_error` after 5 failed attempts.
+4. Return `SettlementResponse` with the ledger `updateId`.
 
 ## Error Reason Codes
 
 | Code | Meaning |
 |---|---|
-| `invalid_exact_canton_transfer_command_not_found` | `transferCommandCid` does not resolve to an active `TransferCommand` visible to the facilitator. |
-| `invalid_exact_canton_amount_mismatch` | `TransferCommand.amount` != `PaymentRequirements.amount`. |
-| `invalid_exact_canton_expired` | `TransferCommand.expiresAt` is past or within the 5-second safety margin. |
-| `invalid_exact_canton_payer_mismatch` | `TransferCommand.sender` != `payload.payer`. |
-| `invalid_exact_canton_merchant_mismatch` | `TransferCommand.receiver` != `PaymentRequirements.payTo`. |
-| `invalid_exact_canton_nonce_reuse` | `TransferCommand.nonce` < `TransferCommandCounter.nextNonce`. |
-| `invalid_exact_canton_merchant_not_registered` | `MerchantContract` is absent or belongs to a different merchant. |
-| `invalid_exact_canton_insufficient_balance` | `payer` Amulet holdings < `PaymentRequirements.amount` (local ACS check). |
-| `invalid_exact_canton_counter_not_ready` | No `TransferCommandCounter` exists for the sender; first-payment settle not yet possible. |
-| `unexpected_canton_ledger_error` | Scan API failure, ledger rejection, or timeout not covered above. |
+| `invalid_exact_canton_allocation_not_found` | `allocationCid` does not resolve to an active `AmuletAllocation` visible to the facilitator. |
+| `invalid_exact_canton_allocation_pending` | Only `allocationInstructionCid` supplied; allocation not yet complete. |
+| `invalid_exact_canton_missing_proof` | Neither `allocationCid` nor `allocationInstructionCid` present in payload. |
+| `invalid_exact_canton_executor_mismatch` | `allocation.settlement.executor` ≠ `extra.feePayer`. |
+| `invalid_exact_canton_payer_mismatch` | `allocation.transferLeg.sender` ≠ `payload.payer`. |
+| `invalid_exact_canton_merchant_mismatch` | `allocation.transferLeg.receiver` ≠ `paymentRequirements.payTo`. |
+| `invalid_exact_canton_amount_mismatch` | `allocation.transferLeg.amount` ≠ `paymentRequirements.amount`. |
+| `invalid_exact_canton_instrument_id_mismatch` | Allocation instrument is not Canton Coin. |
+| `invalid_exact_canton_expired` | `settleBefore` is past or within 5-second safety margin, or `allocateBefore` ≥ `settleBefore`. |
+| `invalid_exact_canton_self_payment` | `payload.payer` equals `extra.feePayer`. |
+| `invalid_exact_canton_insufficient_balance` | Payer Amulet holdings < `paymentRequirements.amount`. |
+| `unexpected_canton_ledger_error` | Participant read failure, ledger rejection, or timeout not covered above. |
 
 ## References
 
 - [x402 v2 spec](https://github.com/x402-foundation/x402/blob/main/specs/x402-specification-v2.md)
 - [SVM scheme spec (precedent)](https://github.com/x402-foundation/x402/blob/main/specs/schemes/exact/scheme_exact_svm.md)
-- [`Splice.ExternalPartyAmuletRules`](https://github.com/hyperledger-labs/splice/blob/main/daml/splice-amulet/daml/Splice/ExternalPartyAmuletRules.daml)
-- [Canton external-party signing](https://docs.digitalasset.com/build/3.4/tutorials/app-dev/external_signing_overview)
+- [CIP-56 Canton Token Standard](https://github.com/canton-foundation/cips/blob/main/cip-0056/cip-0056.md)
+- [`Splice.Api.Token.AllocationV1`](https://github.com/hyperledger-labs/splice/blob/main/token-standard/splice-api-token-allocation-v1/daml/Splice/Api/Token/AllocationV1.daml)
+- [`Splice.AmuletAllocation`](https://github.com/hyperledger-labs/splice/blob/main/daml/splice-amulet/daml/Splice/AmuletAllocation.daml)
+- [Canton network identifiers](https://docs.walletconnect.network/wallet-sdk/chain-support/canton#network-/-chain-information)
