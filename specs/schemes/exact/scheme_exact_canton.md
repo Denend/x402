@@ -17,6 +17,7 @@ facilitator-submitted transaction. No escrow, no facilitator custody.
 |---|---|
 | Canton MainNet | `canton:mainnet` |
 | Canton TestNet | `canton:testnet` |
+| Canton DevNet | `canton:devnet` |
 
 ## Protocol Flow
 
@@ -77,10 +78,7 @@ subsequent payments between that pair.
     "assetTransferMethod": "allocation-direct",
     "feePayer": "ftp_facilitator::1220def...",
     "synchronizerId": "global-domain::1220xyz...",
-    "allocationFactoryCid": "00abc...",
-    "allocationFactoryTemplateId": "0000abc...",
     "instrumentId": { "admin": "DSO::1220...", "id": "Amulet" },
-    "executor": "ftp_facilitator::1220def...",
     "allocateBeforeSeconds": 30,
     "settleBeforeSeconds": 60,
     "memo": "invoice-2024-001"
@@ -88,22 +86,17 @@ subsequent payments between that pair.
 }
 ```
 
-- `amount`: Integer string of atomic units (1 CC = 10¹⁰ units).
+- `amount`: Integer string of atomic units (1 CC = 1e10 units).
   `"1000000000"` = 0.1 CC. Must match exactly what the ledger records.
 - `asset`: `"CC"`. Settles Canton Coin only.
 - `payTo`: Merchant's Canton party id `"<name>::<fingerprint>"`.
 - `extra.assetTransferMethod`: MUST be `"allocation-direct"`.
-- `extra.feePayer`: The facilitator's Canton party id. Equals `executor`.
-  Clients MUST NOT alter this value.
+- `extra.feePayer`: The facilitator's Canton party id. Set as
+  `settlement.executor` in the `AmuletAllocation`. Clients MUST NOT alter
+  this value.
 - `extra.synchronizerId`: The Global Synchronizer the transfer settles on.
-- `extra.allocationFactoryCid`: Contract id of the CIP-56 `AllocationFactory`
-  the client exercises to create the `AmuletAllocation`.
-- `extra.allocationFactoryTemplateId`: Hash-prefixed template id of the
-  `AllocationFactory` (used by the client to verify the resolved factory).
 - `extra.instrumentId`: The Canton Coin instrument identifier
   `{ "admin": "<DSO-party>", "id": "Amulet" }`.
-- `extra.executor`: The facilitator's Canton party id (= `feePayer`). Set as
-  `settlement.executor` in the `AmuletAllocation`.
 - `extra.allocateBeforeSeconds`: Relative deadline (seconds from request time)
   the client uses to compute the absolute `allocateBefore` timestamp in the
   allocation.
@@ -137,10 +130,11 @@ subsequent payments between that pair.
     }
   },
   "payload": {
-    "transferMethod": "allocation-direct",
+    "assetTransferMethod": "allocation-direct",
     "allocationCid": "00abc...",
     "payer": "agent_party::1220...",
-    "directConsentCid": "00def..."
+    "directConsentCid": "00def...",
+    "createUpdateId": "1220alloc..."
   }
 }
 ```
@@ -151,6 +145,9 @@ subsequent payments between that pair.
 - `directConsentCid` (optional): The standing `DirectSettlementConsent` cid
   for the (sender, merchant) pair. When present the facilitator uses it
   directly; when absent the facilitator resolves it from ACS.
+- `createUpdateId` (optional): `updateId` of the `AllocationFactory_Allocate`
+  transaction. The facilitator records it for traffic attribution. Ignored if
+  absent.
 
 ## `SettlementResponse`
 
@@ -192,39 +189,49 @@ On failure:
    `settlement.executor`). If absent or archived, reject with
    `invalid_exact_canton_allocation_not_found`.
 
-4. **Executor.** `allocation.settlement.executor` MUST equal `extra.feePayer`.
-   Reject with `invalid_exact_canton_executor_mismatch`.
+4. **Amount.** `allocation.transferLeg.amount` MUST equal
+   `paymentRequirements.amount` converted to on-ledger Decimal
+   (1 CC = 1e10 atomic units). Reject with
+   `invalid_exact_canton_amount_mismatch`.
 
 5. **Receiver.** `allocation.transferLeg.receiver` MUST equal
    `paymentRequirements.payTo`. Reject with
    `invalid_exact_canton_merchant_mismatch`.
 
-6. **Sender.** `allocation.transferLeg.sender` MUST equal `payload.payer`.
-   Reject with `invalid_exact_canton_payer_mismatch`.
-
-7. **Amount.** `allocation.transferLeg.amount` MUST equal
-   `paymentRequirements.amount` converted to on-ledger Decimal
-   (1 CC = 10¹⁰ atomic units). Reject with
-   `invalid_exact_canton_amount_mismatch`.
-
-8. **Instrument.** `allocation.transferLeg.instrumentId` MUST match Canton
+6. **Instrument.** `allocation.transferLeg.instrumentId` MUST match Canton
    Coin (`extra.instrumentId`). Reject with
    `invalid_exact_canton_instrument_id_mismatch`.
 
-9. **Deadline.** `allocation.settlement.allocateBefore` MUST be strictly
+7. **Executor.** `allocation.settlement.executor` MUST equal `extra.feePayer`.
+   Reject with `invalid_exact_canton_executor_mismatch`.
+
+8. **Deadline.** `allocation.settlement.allocateBefore` MUST be strictly
    before `allocation.settlement.settleBefore`, and `settleBefore` MUST be
    at least 5 seconds in the future at verification time. Reject with
    `invalid_exact_canton_expired`.
 
-10. **Self-payment guard.** `payload.payer` MUST NOT equal `extra.feePayer`.
-    Reject with `invalid_exact_canton_self_payment`.
+9. **Lock integrity.** The backing `LockedAmulet` lock holders MUST equal
+   `[instrument admin / DSO]`. A lock held by any other party means the escrow
+   is not the expected DSO-held lock. Reject with
+   `invalid_exact_canton_holding_locked`. Skipped when the lock view is not
+   projected; the on-ledger execute still enforces lock semantics.
 
-## Balance Check (SHOULD)
+10. **Proven payer.** The facilitator binds `allocation.transferLeg.sender` as
+    the proven payer; the client's `payload.payer` claim is not trusted.
 
-The facilitator SHOULD verify the payer holds ≥ `paymentRequirements.amount`
-in Amulet on the facilitator's participant ACS before returning a successful
-`VerifyResponse`. Reject with `invalid_exact_canton_insufficient_balance` if
-the check fails.
+11. **Self-payment guard.** The proven sender (`allocation.transferLeg.sender`)
+    MUST NOT equal the executor / facilitator party. Reject with
+    `invalid_exact_canton_self_payment`.
+
+## Escrow Sufficiency
+
+No free-balance check is performed. By verification time the funds are already
+locked in `LockedAmulet`; sufficiency is proven by the lock together with Rule 4
+(amount) and Rule 9 (lock integrity). A free-balance read would not see the
+locked Amulet and would wrongly reject a valid allocation. An optional balance
+hook exists but is fail-open and is not wired in production; when wired it MUST
+count the allocation's locked amount. Its reject code is
+`invalid_exact_canton_insufficient_balance`.
 
 ## Duplicate Settlement Mitigation
 
@@ -263,13 +270,13 @@ After verification succeeds:
 | `invalid_exact_canton_allocation_pending` | Only `allocationInstructionCid` supplied; allocation not yet complete. |
 | `invalid_exact_canton_missing_proof` | Neither `allocationCid` nor `allocationInstructionCid` present in payload. |
 | `invalid_exact_canton_executor_mismatch` | `allocation.settlement.executor` ≠ `extra.feePayer`. |
-| `invalid_exact_canton_payer_mismatch` | `allocation.transferLeg.sender` ≠ `payload.payer`. |
 | `invalid_exact_canton_merchant_mismatch` | `allocation.transferLeg.receiver` ≠ `paymentRequirements.payTo`. |
 | `invalid_exact_canton_amount_mismatch` | `allocation.transferLeg.amount` ≠ `paymentRequirements.amount`. |
 | `invalid_exact_canton_instrument_id_mismatch` | Allocation instrument is not Canton Coin. |
+| `invalid_exact_canton_holding_locked` | Backing `LockedAmulet` held by a party other than the DSO / instrument admin. |
 | `invalid_exact_canton_expired` | `settleBefore` is past or within 5-second safety margin, or `allocateBefore` ≥ `settleBefore`. |
-| `invalid_exact_canton_self_payment` | `payload.payer` equals `extra.feePayer`. |
-| `invalid_exact_canton_insufficient_balance` | Payer Amulet holdings < `paymentRequirements.amount`. |
+| `invalid_exact_canton_self_payment` | Proven sender (`allocation.transferLeg.sender`) equals the executor / facilitator party. |
+| `invalid_exact_canton_insufficient_balance` | Payer Canton Coin — counting the locked allocation — is below `paymentRequirements.amount`. |
 | `unexpected_canton_ledger_error` | Participant read failure, ledger rejection, or timeout not covered above. |
 
 ## References
