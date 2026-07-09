@@ -221,13 +221,20 @@ On failure:
 11. **Self-payment guard.** The proven sender MUST NOT equal the facilitator /
     `feePayer` party. Reject with `invalid_exact_canton_self_payment`.
 
+12. **Memo.** If `paymentRequirements.extra.memo` is set, the transfer metadata
+    MUST carry the identical value under `x402.memo`. Reject with
+    `invalid_exact_canton_memo_mismatch`.
+
 ## Funds Sufficiency
 
 There is no lock or escrow step. The payer-signed transfer names the payer's
-specific input holdings; when the facilitator relays it, the ledger executes the
-transfer atomically and rejects it if those inputs do not cover the amount. The
-facilitator performs no separate off-chain balance read. Insufficient funds
-surface as a relay rejection (`invalid_exact_canton_execute_failed`).
+specific input holdings, and those holdings enforce sufficiency: the client cannot
+build the transfer without inputs that cover the amount, and when the facilitator
+relays it the ledger executes atomically and rejects it if the named inputs do not
+cover the amount. The facilitator performs no separate off-chain balance read — it
+maps the ledger's insufficient-funds rejection to
+`invalid_exact_canton_insufficient_balance`, and any other relay failure to
+`invalid_exact_canton_execute_failed`.
 
 ## Replay & Duplicate Settlement
 
