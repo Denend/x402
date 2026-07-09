@@ -133,7 +133,6 @@ MUST renew it before expiry to keep the one-transaction path available.
   },
   "payload": {
     "assetTransferMethod": "transfer-factory",
-    "payer": "agent_party::1220...",
     "submissionRef": "...",
     "preparedTxHash": "1220..."
   }
@@ -141,8 +140,6 @@ MUST renew it before expiry to keep the one-transaction path available.
 ```
 
 - `assetTransferMethod`: `"transfer-factory"`.
-- `payer`: The client's Canton party id — the transfer sender. This is a claim;
-  the facilitator binds the *proven* payer from the signed submission (Rule 8).
 - `submissionRef`: Reference to the payer-signed interactive submission — the
   prepared `TransferFactory_Transfer` together with the payer's signature — that
   the facilitator relays. An implementation MAY instead carry the prepared
@@ -208,7 +205,7 @@ On failure:
    `invalid_exact_canton_preapproval_missing`.
 
 8. **Proven payer.** The facilitator binds the sender of the signed transfer as
-   the proven payer; the client's `payload.payer` claim is not trusted.
+   the proven payer; the client does not supply the payer.
 
 9. **Fee payer.** `extra.feePayer` MUST equal the facilitator's own party — it is
    the relayer that submits the transfer and pays its traffic fee. Reject with
