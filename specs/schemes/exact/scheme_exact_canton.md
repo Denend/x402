@@ -222,16 +222,7 @@ On failure:
     MUST carry the identical value under `x402.memo`. Reject with
     `invalid_exact_canton_memo_mismatch`.
 
-## Funds Sufficiency
-
-There is no lock or escrow step. The payer-signed transfer names the payer's
-specific input holdings, and those holdings enforce sufficiency: the client cannot
-build the transfer without inputs that cover the amount, and when the facilitator
-relays it the ledger executes atomically and rejects it if the named inputs do not
-cover the amount. The facilitator performs no separate off-chain balance read — it
-maps the ledger's insufficient-funds rejection to
-`invalid_exact_canton_insufficient_balance`, and any other relay failure to
-`invalid_exact_canton_execute_failed`.
+13. **Input sufficiency. ** The input holdings embedded in the prepared transaction MUST have distinct contract ids and sum to at least amount plus the transfer's Amulet fees. When the facilitator's participant hosts the proven sender with read access, it SHOULD additionally verify each input holding is active in its ledger view. Reject with `invalid_exact_canton_insufficient_inputs`. Absent the hosted-payer check, verification does not establish the inputs are unspent; that is enforced only at settlement. Servers should therefore be aware that a passing /verify leaves residual risk of wasted resource-handler work if settlement subsequently fails.
 
 ## Replay & Duplicate Settlement
 
