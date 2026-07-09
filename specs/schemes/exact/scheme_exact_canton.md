@@ -45,7 +45,7 @@ sequenceDiagram
     C->>R: GET /resource
     R->>C: 402 Payment Required (PAYMENT-REQUIRED header)
     note over C,F: Client prepares + signs TransferFactory_Transfer<br/>(interactive submission) — does NOT submit
-    C->>R: GET /resource + PAYMENT-SIGNATURE (submissionRef, payer)
+    C->>R: GET /resource + PAYMENT-SIGNATURE (transaction + signature)
     R->>F: POST /verify
     F-->>R: VerifyResponse (valid) — no ledger write
     R->>F: POST /settle
@@ -133,20 +133,23 @@ MUST renew it before expiry to keep the one-transaction path available.
   },
   "payload": {
     "assetTransferMethod": "transfer-factory",
-    "submissionRef": "...",
-    "preparedTxHash": "1220..."
+    "transaction": "<base64 PreparedTransaction, exactly one TransferFactory_Transfer>",
+    "signature": "<base64 ed25519 sig over the prepared-tx hash>",
+    "hashingSchemeVersion": "HASHING_SCHEME_VERSION_V2"
   }
 }
 ```
 
 - `assetTransferMethod`: `"transfer-factory"`.
-- `submissionRef`: Reference to the payer-signed interactive submission — the
-  prepared `TransferFactory_Transfer` together with the payer's signature — that
-  the facilitator relays. An implementation MAY instead carry the prepared
-  transaction and signature inline; the only requirement is that the facilitator
-  can obtain the payer-signed transfer in order to submit it.
-- `preparedTxHash`: The hash the payer signed. Binds the submission to the
-  validated transfer bytes.
+- `transaction`: The base64-encoded serialized `PreparedTransaction`, containing
+  exactly one `TransferFactory_Transfer`. The facilitator relays it unchanged and
+  derives the payer from its sender (Rule 8).
+- `signature`: The payer's `ed25519` signature (base64) over the hash recomputed
+  from `transaction` under `hashingSchemeVersion`. The facilitator wraps it into
+  the ledger's `partySignatures` for the payer party.
+- `hashingSchemeVersion`: The Canton hashing scheme used to compute the signed hash
+  — `HASHING_SCHEME_VERSION_V1` or `HASHING_SCHEME_VERSION_V2` (default V2).
+  Required so the facilitator recomputes the same hash the payer signed.
 
 ## `SettlementResponse`
 
@@ -178,14 +181,14 @@ On failure:
 1. **Network match.** `paymentRequirements.network` MUST equal the facilitator's
    configured network.
 
-2. **Proof present.** The payload MUST reference a payer-signed submission
-   (`submissionRef`, with `preparedTxHash`). If absent, reject with
+2. **Proof present.** The payload MUST carry the payer-signed submission
+   (`transaction`, `signature`, `hashingSchemeVersion`). If absent, reject with
    `invalid_exact_canton_missing_proof`.
 
-3. **Signature valid.** The referenced submission MUST be a
-   `TransferFactory_Transfer` signed by the payer, and the signature MUST verify
-   against the payer party over `preparedTxHash`. Reject with
-   `invalid_exact_canton_signature_invalid`.
+3. **Signature valid.** `transaction` MUST contain exactly one
+   `TransferFactory_Transfer`, and `signature` MUST verify against the payer party
+   over the hash recomputed from `transaction` under `hashingSchemeVersion`. Reject
+   with `invalid_exact_canton_signature_invalid`.
 
 4. **Amount.** The transfer amount MUST equal `paymentRequirements.amount`
    converted to on-ledger Decimal (1 CC = 1e10 atomic units). Reject with
@@ -222,7 +225,26 @@ On failure:
     MUST carry the identical value under `x402.memo`. Reject with
     `invalid_exact_canton_memo_mismatch`.
 
-13. **Input sufficiency. ** The input holdings embedded in the prepared transaction MUST have distinct contract ids and sum to at least amount plus the transfer's Amulet fees. When the facilitator's participant hosts the proven sender with read access, it SHOULD additionally verify each input holding is active in its ledger view. Reject with `invalid_exact_canton_insufficient_inputs`. Absent the hosted-payer check, verification does not establish the inputs are unspent; that is enforced only at settlement. Servers should therefore be aware that a passing /verify leaves residual risk of wasted resource-handler work if settlement subsequently fails.
+13. **Input sufficiency.** The input holdings embedded in the prepared transaction
+    MUST have distinct contract ids and sum to at least `amount` plus the transfer's
+    Amulet fees. When the facilitator's participant hosts the proven sender with read
+    access, it SHOULD additionally verify each input holding is active in its ledger
+    view. Reject with `invalid_exact_canton_insufficient_inputs`. Absent the
+    hosted-payer check, verification does not establish the inputs are unspent; that
+    is enforced only at settlement. Servers should therefore be aware that a passing
+    /verify leaves residual risk of wasted resource-handler work if settlement
+    subsequently fails.
+
+## Funds Sufficiency
+
+There is no lock or escrow step. The payer-signed transfer names the payer's
+specific input holdings, and those holdings enforce sufficiency: the client cannot
+build the transfer without inputs that cover the amount, and when the facilitator
+relays it the ledger executes atomically and rejects it if the named inputs do not
+cover the amount. The facilitator performs no separate off-chain balance read — it
+maps the ledger's insufficient-funds rejection to
+`invalid_exact_canton_insufficient_balance`, and any other relay failure to
+`invalid_exact_canton_execute_failed`.
 
 ## Replay & Duplicate Settlement
 
@@ -271,8 +293,8 @@ After verification succeeds:
 
 | Code | Meaning |
 |---|---|
-| `invalid_exact_canton_missing_proof` | Payload does not reference a payer-signed submission. |
-| `invalid_exact_canton_signature_invalid` | The submission is not validly signed by the payer over `preparedTxHash`. |
+| `invalid_exact_canton_missing_proof` | Payload does not carry the payer-signed submission. |
+| `invalid_exact_canton_signature_invalid` | `signature` does not verify against the payer over the hash recomputed from `transaction`. |
 | `invalid_exact_canton_amount_mismatch` | Transfer amount ≠ `paymentRequirements.amount`. |
 | `invalid_exact_canton_merchant_mismatch` | Transfer receiver ≠ `paymentRequirements.payTo`. |
 | `invalid_exact_canton_instrument_id_mismatch` | Transfer instrument is not Canton Coin. |
