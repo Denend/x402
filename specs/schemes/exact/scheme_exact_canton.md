@@ -3,7 +3,10 @@
 This document specifies the `exact` payment scheme for the x402 protocol on
 Canton Network. The client signs a `TransferFactory_Transfer` (CIP-56 Token
 Standard transfer instruction) naming the merchant as receiver, but does **not**
-submit it. The facilitator relays the payer-signed transaction and pays the
+submit it. The client carries the complete signed transaction **inline**
+(gzip-compressed) in the payment payload, so **any** facilitator can relay it —
+the client is not bound to, and needs no prior relationship with, a specific
+facilitator. The facilitator relays the payer-signed transaction and pays the
 network traffic fee. Because the merchant holds a standing `TransferPreapproval`,
 the transfer resolves directly — moving Canton Coin to the merchant in a single
 facilitator-submitted transaction. No escrow, no lock step, no facilitator
@@ -28,8 +31,11 @@ One transaction settles each payment:
 - **Client (off-ledger):** signs a `TransferFactory_Transfer` — `sender = payer`,
   `receiver = merchant`, `amount`, the specific `inputHoldingCids` spent, and an
   `executeBefore` deadline — as an interactive submission. The client does not
-  submit it to the ledger; it hands the signed submission to the facilitator in
-  the payment payload.
+  submit it to the ledger; it carries the complete signed submission — the
+  prepared transaction (with its disclosed contracts embedded) plus the payer's
+  signature — **inline and gzip-compressed** in the payment payload. The prepared
+  transaction is self-contained, so any facilitator can relay it without prior
+  state about this payer or payment.
 - **Facilitator (on-ledger):** relays (submits) the payer-signed transaction and
   pays the traffic fee. Because the merchant holds a live `TransferPreapproval`,
   the transfer resolves `direct` and pays the merchant in one transaction. The
@@ -45,7 +51,7 @@ sequenceDiagram
     C->>R: GET /resource
     R->>C: 402 Payment Required (PAYMENT-REQUIRED header)
     note over C,F: Client prepares + signs TransferFactory_Transfer<br/>(interactive submission) — does NOT submit
-    C->>R: GET /resource + PAYMENT-SIGNATURE (submissionRef + signature)
+    C->>R: GET /resource + PAYMENT-SIGNATURE (gzip(preparedTx) + signature)
     R->>F: POST /verify
     F-->>R: VerifyResponse (valid) — no ledger write
     R->>F: POST /settle
@@ -54,6 +60,16 @@ sequenceDiagram
     F-->>R: SettlementResponse (updateId)
     R->>C: 200 + PAYMENT-RESPONSE
 ```
+
+### Facilitator Independence
+
+A server selects its facilitator opaquely to the client, and there may be many
+facilitators. Because the signed submission travels **inline** in the payload and
+is self-contained, any facilitator can relay it: the relaying participant submits
+the payer-signed transaction on the payer's behalf (it neither hosts the payer
+nor signs for it) and pays the traffic fee. There is no requirement that the
+client be hosted on, or have any relationship with, the facilitator's
+participant.
 
 ## Merchant Onboarding
 
@@ -133,7 +149,7 @@ MUST renew it before expiry to keep the one-transaction path available.
   },
   "payload": {
     "assetTransferMethod": "transfer-factory",
-    "submissionRef": "<facilitator-issued ref to the prepared TransferFactory_Transfer>",
+    "preparedTransaction": "<base64( gzip( prepared TransferFactory_Transfer, disclosed contracts embedded ) )>",
     "preparedTxHash": "<hex hash of the prepared tx the payer signed>",
     "signature": "<base64 ed25519 sig over preparedTxHash>",
     "hashingSchemeVersion": "HASHING_SCHEME_VERSION_V2"
@@ -142,17 +158,40 @@ MUST renew it before expiry to keep the one-transaction path available.
 ```
 
 - `assetTransferMethod`: `"transfer-factory"`.
-- `submissionRef`: Facilitator-issued reference to the prepared
-  `TransferFactory_Transfer` it holds in a short-lived prepare cache. An unknown or
-  expired ref rejects with `invalid_exact_canton_submission_not_found`; the client
-  then re-prepares.
+- `preparedTransaction`: The complete prepared `TransferFactory_Transfer` (with
+  its disclosed contracts embedded), carried inline as base64 of a **single gzip
+  member**. It is self-contained: the facilitator relays exactly these bytes and
+  resolves nothing on the client's behalf. Encoding and size limits are defined in
+  *Payload Encoding & Limits*.
 - `preparedTxHash`: The hex hash of the prepared transaction the payer signed. The
-  facilitator recomputes it from the referenced transaction and MUST match this.
+  facilitator recomputes it from the decoded prepared transaction and MUST match
+  this.
 - `signature`: The payer's `ed25519` signature (base64) over `preparedTxHash`. The
   facilitator wraps it into the ledger's `partySignatures` for the payer party and
-  derives the payer from the referenced transaction's sender (Rule 8).
+  derives the payer from the decoded prepared transaction's sender (Rule 8).
 - `hashingSchemeVersion`: The Canton hashing scheme used to compute the signed hash
   — `HASHING_SCHEME_VERSION_V1` or `HASHING_SCHEME_VERSION_V2` (default V2).
+
+## Payload Encoding & Limits
+
+`payload.preparedTransaction` is the prepared transaction encoded as
+`base64( gzip( bytes ) )`. Facilitators MUST enforce all of the following when
+decoding it, and reject a payload that violates any of them with
+`invalid_exact_canton_malformed_payload`:
+
+- **Single gzip member.** The input MUST be exactly one gzip member: reject
+  trailing bytes after the member and concatenated members, and reject the
+  optional filename / comment / extra header fields.
+- **Bounded decompression.** Decompress incrementally and abort as soon as either
+  bound is exceeded: a compressed-size cap (RECOMMENDED ~8 KiB of gzip data) and a
+  decompressed-size cap (RECOMMENDED ~64 KiB). Never allocate the output up front
+  from a declared size.
+- **Bounded decode.** After decompression, cap the work spent decoding the
+  transaction: bound structural nesting depth, total node count, and parse time,
+  and stop immediately at the first breach.
+
+These bounds make the inline payload safe to accept from an untrusted client
+(decompression-bomb, resource-exhaustion, and ambiguous-input resistance).
 
 ## `SettlementResponse`
 
@@ -184,12 +223,13 @@ On failure:
 1. **Network match.** `paymentRequirements.network` MUST equal the facilitator's
    configured network.
 
-2. **Proof present.** The payload MUST carry `submissionRef`, `preparedTxHash` and
-   `signature`. If absent, reject with `invalid_exact_canton_missing_proof`; if
-   `submissionRef` resolves to no prepared transaction, reject with
-   `invalid_exact_canton_submission_not_found`.
+2. **Proof present & well-formed.** The payload MUST carry `preparedTransaction`,
+   `preparedTxHash` and `signature`. If absent, reject with
+   `invalid_exact_canton_missing_proof`. `preparedTransaction` MUST decode within
+   the bounds of *Payload Encoding & Limits*; a malformed or over-limit payload
+   rejects with `invalid_exact_canton_malformed_payload`.
 
-3. **Signature valid.** The referenced prepared transaction MUST contain exactly one
+3. **Signature valid.** The decoded prepared transaction MUST contain exactly one
    `TransferFactory_Transfer`, its recomputed hash MUST equal `preparedTxHash`, and
    `signature` MUST verify against the payer party over that hash. Reject with
    `invalid_exact_canton_signature_invalid`.
@@ -269,11 +309,12 @@ After verification succeeds:
 1. **Confirm preapproval.** Confirm the merchant holds a live
    `TransferPreapproval` for the instrument (resolves `direct`).
 
-2. **Relay.** Submit the payer-signed `TransferFactory_Transfer`, resolving the
-   transfer's execution context (instrument config, amulet rules, active open
-   round) from the SV Scan registry as disclosed contracts. The facilitator is
-   the sole submitter and pays the traffic fee; it signs nothing on the payer's
-   behalf, and the funds move from the payer's own holdings.
+2. **Relay.** Submit the payer-signed `TransferFactory_Transfer` exactly as
+   decoded — its execution context (instrument config, amulet rules, active open
+   round) is already embedded as disclosed contracts, so the facilitator resolves
+   nothing further. The facilitator is the sole submitter and pays the traffic
+   fee; it signs nothing on the payer's behalf, and the funds move from the
+   payer's own holdings.
 
 3. **Confirm funds moved.** The settlement transaction consumes the payer's input
    holding and pays the merchant directly, with no pending `TransferInstruction`
@@ -287,7 +328,7 @@ After verification succeeds:
 | Code | Meaning |
 |---|---|
 | `invalid_exact_canton_missing_proof` | Payload does not carry the payer-signed submission. |
-| `invalid_exact_canton_submission_not_found` | `submissionRef` resolves to no prepared transaction (unknown or expired); the client re-prepares. |
+| `invalid_exact_canton_malformed_payload` | `preparedTransaction` is not valid base64 / a single gzip member, or exceeds the compressed, decompressed, or decode bounds. |
 | `invalid_exact_canton_signature_invalid` | `signature` does not verify against the payer over `preparedTxHash`. |
 | `invalid_exact_canton_amount_mismatch` | Transfer amount ≠ `paymentRequirements.amount`. |
 | `invalid_exact_canton_merchant_mismatch` | Transfer receiver ≠ `paymentRequirements.payTo`. |
