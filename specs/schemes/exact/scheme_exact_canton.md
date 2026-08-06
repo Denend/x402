@@ -193,6 +193,16 @@ decoding it, and reject a payload that violates any of them with
 These bounds make the inline payload safe to accept from an untrusted client
 (decompression-bomb, resource-exhaustion, and ambiguous-input resistance).
 
+### Header size
+
+HTTP servers and intermediaries supporting this scheme SHOULD accept a
+`PAYMENT-SIGNATURE` header of at least 16 KiB end to end. This provides headroom
+for the full payload and extension metadata: `base64(gzip(preparedTransaction))`
+alone is typically 6–7 KiB, and encoding the complete `PaymentPayload` commonly
+produces a header exceeding 8 KiB. Deployments that cannot accept a 16 KiB
+`PAYMENT-SIGNATURE` header SHOULD use a transport, such as MCP, that does not
+carry the `PaymentPayload` in an HTTP header.
+
 ## `SettlementResponse`
 
 ```json
