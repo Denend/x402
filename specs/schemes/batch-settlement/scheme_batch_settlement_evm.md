@@ -457,9 +457,11 @@ Example facilitator response for a refund:
 
 `amount` is the amount returned to the payer.
 
+If a `deposit`, `claim`, `settle`, or `refund` transaction broadcasts successfully but its confirmation cannot be established (e.g. a node/RPC error or timeout while waiting for the receipt), the facilitator MAY return `settlement_pending` (see [§9 Error Handling](../../x402-specification-v2.md#9-error-handling)) with the broadcast transaction hash in `transaction`, so the caller can reconcile on chain before retrying.
+
 ### GET /supported
 
-The facilitator declares a receiver authorizer whose role is to produce EIP-712 signatures for claims and refunds. The server may delegate to this address as its channel's `receiverAuthorizer`, or supply its own. Any address in `signers` may relay the resulting transactions.
+The facilitator MAY declare a receiver authorizer whose role is to produce EIP-712 signatures for claims and refunds. The server may delegate to this address as its channel's `receiverAuthorizer`, or supply its own. Any address in `signers` may relay the resulting transactions.
 
 ```json
 {
@@ -647,6 +649,7 @@ The recovery baseline is:
 | `invalid_batch_settlement_evm_wait_for_receipt_failed`                   | Facilitator failed while waiting for the transaction receipt                 |
 | `invalid_batch_settlement_evm_withdraw_delay_mismatch`                   | Channel withdraw delay does not match `extra.withdrawDelay`                  |
 | `invalid_batch_settlement_evm_withdraw_delay_out_of_range`               | Withdraw delay is outside the 15 min - 30 day bounds                         |
+| `settlement_pending`                                                     | Broadcast succeeded but confirmation could not be established — **non-terminal**; carries the broadcast `transaction` hash so the caller can reconcile on chain before retrying |
 
 ---
 
@@ -659,6 +662,8 @@ The recovery baseline is:
 3. **Cross-function replay prevention**: `Voucher`, `Refund`, and `ClaimBatch` use distinct EIP-712 type hashes so a signature for one cannot be replayed as another. Refunds additionally carry a per-channel nonce.
 
 4. **Voucher expiry via escrow depletion**: Vouchers carry no expiry field. A voucher remains claimable as long as `balance - totalClaimed > 0`; `finalizeWithdraw` and `refundWithSignature` close the claim window by draining available escrow. The ERC-3009 `validBefore`/`validAfter` fields bound only the deposit authorization, not the voucher.
+
+5. **Refund authorization when the facilitator is `receiverAuthorizer`**: A cooperative refund bypasses the timed-withdrawal delay, so it must carry receiver-side consent. When a server supplies its own `refundAuthorizerSignature` that signature is the consent. When the server delegates `receiverAuthorizer` to the facilitator, the faciltator MUST authenticate that each `refund` request originates from the service that created the channel (e.g. SIWX, JWT, or API credential bound at channel-creation time) and reject all others. A facilitator with no such authentication mechanism MUST NOT advertise a `receiverAuthorizer` in `/supported`.
 
 ---
 

@@ -11,7 +11,6 @@ import logging
 import re
 from collections.abc import Generator
 from typing import TYPE_CHECKING, Any, Literal, Protocol
-from urllib.parse import unquote
 
 from ..schemas import (
     PaymentPayload,
@@ -20,6 +19,7 @@ from ..schemas import (
     ResourceInfo,
     SettleResponse,
     SkipHandlerDirective,
+    convert_to_token_amount,
 )
 from ..schemas.errors import SettleError
 from ..schemas.hooks import AbortProtectedRequestResult, GrantAccessResult
@@ -60,6 +60,39 @@ if TYPE_CHECKING:
     from ..server import x402ResourceServer, x402ResourceServerSync
 
 logger = logging.getLogger("x402")
+
+PAYMENT_REQUIRED_CACHE_CONTROL = "no-store"
+
+
+def with_private_cache_control(value: str | None) -> str:
+    """Append the ``private`` directive to an existing Cache-Control header value."""
+    if not value:
+        return "private"
+
+    directives = [directive.strip().lower() for directive in value.split(",")]
+    if "private" in directives:
+        return value
+
+    return f"{value}, private"
+
+
+def _path_unescape(segment: str) -> str | None:
+    """Decode one path segment; return None if any escape is malformed."""
+    out: list[str] = []
+    i = 0
+    while i < len(segment):
+        if segment[i] != "%":
+            out.append(segment[i])
+            i += 1
+            continue
+        if i + 2 >= len(segment):
+            return None
+        hex_digits = segment[i + 1 : i + 3]
+        if not re.fullmatch(r"[0-9A-Fa-f]{2}", hex_digits):
+            return None
+        out.append(chr(int(hex_digits, 16)))
+        i += 3
+    return "".join(out)
 
 
 # ============================================================================
@@ -458,6 +491,31 @@ class x402HTTPServerBase:
                 ),
             )
 
+        # Reject payments whose echoed extension info drops or changes a
+        # server-advertised (non-dynamic) field before verification.
+        extension_result = self._server.validate_extensions(payment_required, payment_payload)
+        if not extension_result.valid:
+            mismatch_required = yield (
+                "create_payment_required",
+                (
+                    requirements,
+                    resource_info,
+                    extension_result.invalid_reason,
+                    extensions,
+                    transport_context,
+                    payment_payload,
+                ),
+                None,
+            )
+            return HTTPProcessResult(
+                type=RESULT_PAYMENT_ERROR,
+                response=self._create_http_response(
+                    mismatch_required,
+                    is_web_browser=False,
+                    paywall_config=paywall_config,
+                ),
+            )
+
         # Verify payment (yield for async/sync handling)
         try:
             verify_result = yield (
@@ -585,7 +643,7 @@ class x402HTTPServerBase:
     def resolve_settlement_override_amount(
         raw_amount: str,
         requirements: PaymentRequirements,
-        decimals: int = 6,
+        decimals: int | None = None,
     ) -> str:
         """Resolve a settlement override amount to atomic units."""
         percent_match = re.match(r"^(\d+(?:\.\d{0,2})?)%$", raw_amount)
@@ -599,8 +657,12 @@ class x402HTTPServerBase:
 
         dollar_match = re.match(r"^\$(\d+(?:\.\d+)?)$", raw_amount)
         if dollar_match:
-            dollars = float(dollar_match.group(1))
-            return str(round(dollars * (10**decimals)))
+            if decimals is None:
+                raise ValueError(
+                    f'Cannot convert dollar settlement override "{raw_amount}" to atomic units: '
+                    "asset decimals are unknown. Pass an atomic amount or register the asset."
+                )
+            return convert_to_token_amount(dollar_match.group(1), decimals)
 
         return raw_amount
 
@@ -613,15 +675,19 @@ class x402HTTPServerBase:
         if overrides is None or "amount" not in overrides:
             return requirements
 
-        scheme = self._server._find_registered_scheme(requirements.scheme, requirements.network)
-        decimals = 6
-        if scheme is not None:
-            get_decimals = getattr(scheme, "get_asset_decimals", None)
-            if callable(get_decimals):
-                decimals = get_decimals(requirements.asset or "", requirements.network)
+        raw_amount = str(overrides["amount"])
+        # Only `$…` overrides need asset decimals. Atomic and percent formats must
+        # not force a decimals lookup (unknown custom mints would otherwise fail).
+        decimals = None
+        if re.match(r"^\$(\d+(?:\.\d+)?)$", raw_amount):
+            scheme = self._server._find_registered_scheme(requirements.scheme, requirements.network)
+            if scheme is not None:
+                get_decimals = getattr(scheme, "get_asset_decimals", None)
+                if callable(get_decimals):
+                    decimals = get_decimals(requirements.asset or "", requirements.network)
 
         resolved = self.resolve_settlement_override_amount(
-            str(overrides["amount"]),
+            raw_amount,
             requirements,
             decimals,
         )
@@ -649,6 +715,7 @@ class x402HTTPServerBase:
                 headers={
                     "Content-Type": content_type,
                     **settle_result.headers,
+                    "Cache-Control": with_private_cache_control(None),
                 },
                 body=body,
                 is_html="text/html" in content_type,
@@ -792,6 +859,7 @@ class x402HTTPServerBase:
                 headers={
                     "Content-Type": "text/html",
                     PAYMENT_REQUIRED_HEADER: encode_payment_required_header(payment_required),
+                    "Cache-Control": PAYMENT_REQUIRED_CACHE_CONTROL,
                 },
                 body=html_content,
                 is_html=True,
@@ -810,6 +878,7 @@ class x402HTTPServerBase:
             headers={
                 "Content-Type": content_type,
                 PAYMENT_REQUIRED_HEADER: encode_payment_required_header(payment_required),
+                "Cache-Control": PAYMENT_REQUIRED_CACHE_CONTROL,
             },
             body=body,
         )
@@ -852,6 +921,7 @@ class x402HTTPServerBase:
             headers={
                 "Content-Type": content_type,
                 **settlement_headers,
+                "Cache-Control": PAYMENT_REQUIRED_CACHE_CONTROL,
             },
             body=body,
             is_html=content_type.startswith("text/html"),
@@ -925,28 +995,52 @@ class x402HTTPServerBase:
             verb = "*"
             path = pattern
 
+        # A trailing "/*" must also match the bare prefix. _normalize_path strips
+        # the trailing slash, so a request for "/api/premium/" arrives as
+        # "/api/premium", which a literal "/.*?" suffix would not match even
+        # though routers dispatch it to the protected handler.
+        trailing_wildcard = path.endswith("/*")
+        path_for_regex = path[:-2] if trailing_wildcard else path
+
         # Convert to regex
-        regex_pattern = "^" + re.escape(path)
+        regex_pattern = "^" + re.escape(path_for_regex)
         regex_pattern = regex_pattern.replace(r"\*", ".*?")  # Wildcards
         regex_pattern = re.sub(r"\\\[([^\]]+)\\\]", r"[^/]+", regex_pattern)  # [param]
         regex_pattern = re.sub(r":([a-zA-Z_]\w*)", r"[^/]+", regex_pattern)  # :param
+        if trailing_wildcard:
+            regex_pattern += r"(?:/.*?)?"
         regex_pattern += "$"
 
-        return verb, path, re.compile(regex_pattern, re.IGNORECASE)
+        # re.DOTALL: without it, "." (from a "*" wildcard) does not match a line
+        # feed, so a request path whose wildcard tail contains a decoded LF fails
+        # to match its own route, skipping payment verification and settlement.
+        return verb, path, re.compile(regex_pattern, re.IGNORECASE | re.DOTALL)
 
     @staticmethod
     def _normalize_path(path: str) -> str:
-        """Normalize path for matching."""
-        # Remove query string and fragment
+        """Normalize path for matching.
+
+        The input is expected to be the *escaped* request path, which is the
+        same view HTTP routers use to split a request into segments.
+        Percent-escapes are decoded one segment at a time and any separator they
+        yield is re-escaped, so a decoded byte can never create a segment
+        boundary that the router did not see.
+        """
         path = path.split("?")[0].split("#")[0]
 
-        # Decode URL encoding
-        try:
-            path = unquote(path)
-        except Exception:
-            pass
+        segments = path.split("/")
+        normalized_segments: list[str] = []
+        for segment in segments:
+            decoded = _path_unescape(segment)
+            if decoded is None:
+                # Malformed escape sequence: match on the raw segment rather than
+                # silently widening it.
+                normalized_segments.append(segment)
+                continue
+            decoded = decoded.replace("/", "%2F").replace("\\", "%5C")
+            normalized_segments.append(decoded)
+        path = "/".join(normalized_segments)
 
-        # Normalize slashes
         path = re.sub(r"/+", "/", path)
         path = path.rstrip("/")
 

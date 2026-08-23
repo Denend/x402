@@ -26,6 +26,8 @@ from ..constants import (  # noqa: E402
     BALANCE_OF_ABI,
     ERC20_ALLOWANCE_ABI,
     ERR_ASSET_NOT_DEPLOYED_CONTRACT,
+    ERR_ERC20_APPROVAL_BROADCAST_FAILED,
+    ERR_ERC20_APPROVAL_TX_FAILED,
     ERR_INSUFFICIENT_BALANCE,
     ERR_NETWORK_MISMATCH,
     ERR_PERMIT2_ALLOWANCE_REQUIRED,
@@ -41,12 +43,13 @@ from ..constants import (  # noqa: E402
     PERMIT2_ADDRESS,
     PERMIT2_WITNESS_TYPES,
     SCHEME_EXACT,
-    TX_STATUS_SUCCESS,
     X402_EXACT_PERMIT2_PROXY_ABI,
     X402_EXACT_PERMIT2_PROXY_ADDRESS,
     X402_EXACT_PERMIT2_PROXY_SETTLE_WITH_PERMIT_ABI,
 )
+from ..data_suffix import resolve_data_suffix  # noqa: E402
 from ..erc6492 import parse_erc6492_signature  # noqa: E402
+from ..settle_receipt import wait_for_receipt_and_build_response  # noqa: E402
 from ..signer import ClientEvmSigner, FacilitatorEvmSigner  # noqa: E402
 from ..types import (  # noqa: E402
     ExactPermit2Authorization,
@@ -57,10 +60,14 @@ from ..types import (  # noqa: E402
 )
 from ..utils import (  # noqa: E402
     create_permit2_nonce,
+    final_hash_from_two_request_send,
     get_evm_chain_id,
     hex_to_bytes,
+    is_valid_tx_hash,
     normalize_address,
+    truncate_error_message,
 )
+from ..verify import verify_typed_data_strict  # noqa: E402
 
 
 def create_permit2_payload(
@@ -438,10 +445,15 @@ def settle_permit2(
             transaction="",
         )
 
+    # Resolved once and appended to whichever settlement calldata is broadcast.
+    data_suffix = resolve_data_suffix(context, payload, requirements)
+
     # Branch: EIP-2612 gas sponsoring (atomic settleWithPermit)
     eip2612_info = extract_eip2612_gas_sponsoring_info(payload)
     if eip2612_info is not None:
-        return _settle_permit2_with_eip2612(signer, payload, permit2_payload, eip2612_info)
+        return _settle_permit2_with_eip2612(
+            signer, payload, permit2_payload, eip2612_info, data_suffix=data_suffix
+        )
 
     # Branch: ERC-20 approval gas sponsoring (broadcast approval + settle)
     erc20_info = extract_erc20_approval_gas_sponsoring_info(payload)
@@ -451,11 +463,11 @@ def settle_permit2(
             extension_signer = ext.resolve_signer(str(payload.accepted.network))
             if extension_signer is not None:
                 return _settle_permit2_with_erc20_approval(
-                    extension_signer, payload, permit2_payload, erc20_info
+                    extension_signer, payload, permit2_payload, erc20_info, data_suffix=data_suffix
                 )
 
     # Branch: standard settle (allowance already on-chain)
-    return _settle_permit2_direct(signer, payload, permit2_payload)
+    return _settle_permit2_direct(signer, payload, permit2_payload, data_suffix=data_suffix)
 
 
 def _build_permit2_settle_args(
@@ -488,6 +500,7 @@ def _settle_permit2_direct(
     signer: FacilitatorEvmSigner,
     payload: PaymentPayload,
     permit2_payload: ExactPermit2Payload,
+    data_suffix: str | None = None,
 ) -> SettleResponse:
     """Standard Permit2 settle — allowance is already on-chain."""
     payer = permit2_payload.permit2_authorization.from_address
@@ -506,23 +519,11 @@ def _settle_permit2_direct(
             owner_addr,
             witness_tuple,
             sig_bytes,
+            data_suffix=data_suffix,
         )
 
-        receipt = signer.wait_for_transaction_receipt(tx_hash)
-        if receipt.status != TX_STATUS_SUCCESS:
-            return SettleResponse(
-                success=False,
-                error_reason=ERR_TRANSACTION_FAILED,
-                transaction=tx_hash,
-                network=network,
-                payer=payer,
-            )
-
-        return SettleResponse(
-            success=True,
-            transaction=tx_hash,
-            network=network,
-            payer=payer,
+        return wait_for_receipt_and_build_response(
+            signer, tx_hash, network, payer, failed_reason=ERR_TRANSACTION_FAILED
         )
 
     except Exception as e:
@@ -534,6 +535,7 @@ def _settle_permit2_with_eip2612(
     payload: PaymentPayload,
     permit2_payload: ExactPermit2Payload,
     eip2612_info: Any,
+    data_suffix: str | None = None,
 ) -> SettleResponse:
     """Settle via settleWithPermit — includes the EIP-2612 permit atomically."""
     payer = permit2_payload.permit2_authorization.from_address
@@ -571,23 +573,11 @@ def _settle_permit2_with_eip2612(
             owner_addr,
             witness_tuple,
             sig_bytes,
+            data_suffix=data_suffix,
         )
 
-        receipt = signer.wait_for_transaction_receipt(tx_hash)
-        if receipt.status != TX_STATUS_SUCCESS:
-            return SettleResponse(
-                success=False,
-                error_reason=ERR_TRANSACTION_FAILED,
-                transaction=tx_hash,
-                network=network,
-                payer=payer,
-            )
-
-        return SettleResponse(
-            success=True,
-            transaction=tx_hash,
-            network=network,
-            payer=payer,
+        return wait_for_receipt_and_build_response(
+            signer, tx_hash, network, payer, failed_reason=ERR_TRANSACTION_FAILED
         )
 
     except Exception as e:
@@ -599,6 +589,7 @@ def _settle_permit2_with_erc20_approval(
     payload: PaymentPayload,
     permit2_payload: ExactPermit2Payload,
     erc20_info: Any,
+    data_suffix: str | None = None,
 ) -> SettleResponse:
     """Settle via extension signer's send_transactions (approval + settle)."""
     payer = permit2_payload.permit2_authorization.from_address
@@ -619,28 +610,24 @@ def _settle_permit2_with_erc20_approval(
                     abi=X402_EXACT_PERMIT2_PROXY_ABI,
                     function="settle",
                     args=[permit_tuple, owner_addr, witness_tuple, sig_bytes],
+                    data_suffix=data_suffix,
                 ),
             ]
         )
 
-        settle_tx_hash = tx_hashes[-1] if tx_hashes else ""
-        receipt = extension_signer.wait_for_transaction_receipt(settle_tx_hash)
-        if receipt.status != TX_STATUS_SUCCESS:
-            return SettleResponse(
-                success=False,
-                error_reason=ERR_TRANSACTION_FAILED,
-                transaction=settle_tx_hash,
-                network=network,
-                payer=payer,
+        settle_tx_hash = final_hash_from_two_request_send(tx_hashes)
+        if settle_tx_hash is None or not is_valid_tx_hash(settle_tx_hash):
+            raise RuntimeError(
+                f"{ERR_ERC20_APPROVAL_TX_FAILED}: extension signer returned no valid settlement transaction hash"
             )
 
-        return SettleResponse(
-            success=True,
-            transaction=settle_tx_hash,
-            network=network,
-            payer=payer,
+        return wait_for_receipt_and_build_response(
+            extension_signer,
+            settle_tx_hash,
+            network,
+            payer,
+            failed_reason=ERR_TRANSACTION_FAILED,
         )
-
     except Exception as e:
         return _map_settle_error(e, network, payer)
 
@@ -663,13 +650,13 @@ def _map_settle_error(error: Exception, network: str, payer: str) -> SettleRespo
         error_reason = ERR_PERMIT2_INVALID_SIGNATURE
     elif "InvalidNonce" in error_msg:
         error_reason = "permit2_invalid_nonce"
-    elif "erc20_approval_tx_failed" in error_msg:
-        error_reason = "erc20_approval_tx_failed"
+    elif ERR_ERC20_APPROVAL_TX_FAILED in error_msg:
+        error_reason = ERR_ERC20_APPROVAL_BROADCAST_FAILED
 
     return SettleResponse(
         success=False,
         error_reason=error_reason,
-        error_message=error_msg[:500],
+        error_message=truncate_error_message(error_msg),
         network=network,
         payer=payer,
         transaction="",
@@ -739,7 +726,9 @@ def _verify_permit2_signature(
         permit2_authorization, chain_id
     )
 
-    return signer.verify_typed_data(
+    # Uses the strict primitive that mirrors on-chain SignatureChecker (code-routed, no ECDSA fallback).
+    return verify_typed_data_strict(
+        signer,
         payer,
         domain_dict,  # type: ignore[arg-type]
         typed_fields,

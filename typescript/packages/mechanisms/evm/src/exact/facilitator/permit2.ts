@@ -25,8 +25,9 @@ import {
 import * as Errors from "./errors";
 import { FacilitatorEvmSigner } from "../../signer";
 import { ExactPermit2Payload } from "../../types";
-import { getEvmChainId } from "../../utils";
+import { finalHashFromTwoRequestSend, getEvmChainId, isValidTxHash } from "../../utils";
 import { validateErc20ApprovalForPayment } from "./erc20approval";
+import { verifyTypedDataSignature } from "../../shared/verifySignature";
 import {
   simulatePermit2Settle,
   simulatePermit2SettleWithPermit,
@@ -36,10 +37,10 @@ import {
   validateEip2612PermitForPayment,
   buildExactPermit2SettleArgs,
   splitEip2612Signature,
-  waitAndReturnSettleResponse,
   mapSettleError,
   type Permit2ProxyConfig,
 } from "../../shared/permit2";
+import { waitAndReturnSettleResponse } from "../../shared/settleReceipt";
 
 const exactProxyConfig: Permit2ProxyConfig = {
   proxyAddress: x402ExactPermit2ProxyAddress,
@@ -191,34 +192,23 @@ export async function verifyPermit2(
     },
   };
 
-  // Verify signature
-  // Note: verifyTypedData is implementation-dependent and pluggable on FacilitatorEvmSigner
-  // Some implementations only do EOA-style ECDSA recovery (e.g. viem/utils verifyTypedData, ethers.verifyTypedData)
-  // Viem's publicClient.verifyTypedData supports EOA and Smart Contract Account (ERC-1271 / ERC-6492) signature verification
-  let signatureValid = false;
-  try {
-    signatureValid = await signer.verifyTypedData({
-      address: payer,
-      ...permit2TypedData,
-      signature: permit2Payload.signature,
-    });
-  } catch {
-    signatureValid = false;
-  }
-
+  // Verify signature using a strict primitive that mirrors Permit2's
+  // on-chain SignatureVerification (libraries/SignatureVerification.sol):
+  // ecrecover when the address has no code, strict EIP-1271 isValidSignature
+  // when it does. No ECDSA fallback for addresses with code — that fallback
+  // would accept signatures Permit2 rejects on-chain (notably for ERC-7702
+  // EOAs whose delegate doesn't accept raw owner ECDSA).
+  const signatureValid = await verifyTypedDataSignature(signer, {
+    address: payer,
+    ...permit2TypedData,
+    signature: permit2Payload.signature,
+  });
   if (!signatureValid) {
-    // Check if the payer is a deployed smart contract
-    const bytecode = await signer.getCode({ address: payer });
-    const isDeployedContract = bytecode && bytecode !== "0x";
-
-    if (!isDeployedContract) {
-      return {
-        isValid: false,
-        invalidReason: Errors.ErrPermit2InvalidSignature,
-        payer,
-      };
-    }
-    // Deployed smart contract: fall through to simulation
+    return {
+      isValid: false,
+      invalidReason: Errors.ErrPermit2InvalidSignature,
+      payer,
+    };
   }
 
   // If simulation is disabled, return early
@@ -448,7 +438,9 @@ async function settlePermit2WithEIP2612(
       dataSuffix,
     });
 
-    return waitAndReturnSettleResponse(signer, tx, payload, payer);
+    return await waitAndReturnSettleResponse(signer, tx, payload.accepted.network, payer, {
+      failedStatusReason: Errors.ErrTransactionFailed,
+    });
   } catch (error) {
     return mapSettleError(error, payload, payer);
   }
@@ -491,8 +483,20 @@ async function settlePermit2WithERC20Approval(
       { to: config.proxyAddress, data: settleData, gas: BigInt(300_000) },
     ]);
 
-    const settleTxHash = txHashes[txHashes.length - 1];
-    return waitAndReturnSettleResponse(extensionSigner, settleTxHash, payload, payer);
+    const settleTxHash = finalHashFromTwoRequestSend(txHashes);
+    if (!settleTxHash || !isValidTxHash(settleTxHash)) {
+      throw new Error(
+        `${Errors.ErrErc20ApprovalTxFailed}: extension signer returned no valid settlement transaction hash`,
+      );
+    }
+
+    return await waitAndReturnSettleResponse(
+      extensionSigner,
+      settleTxHash,
+      payload.accepted.network,
+      payer,
+      { failedStatusReason: Errors.ErrTransactionFailed },
+    );
   } catch (error) {
     return mapSettleError(error, payload, payer);
   }
@@ -525,7 +529,9 @@ async function settlePermit2Direct(
       dataSuffix,
     });
 
-    return waitAndReturnSettleResponse(signer, tx, payload, payer);
+    return await waitAndReturnSettleResponse(signer, tx, payload.accepted.network, payer, {
+      failedStatusReason: Errors.ErrTransactionFailed,
+    });
   } catch (error) {
     return mapSettleError(error, payload, payer);
   }

@@ -38,6 +38,24 @@ There are pre-configured [examples available in the x402 repo](https://github.co
 
     # For Stellar support, also add:
     npm install @x402/stellar
+
+    # For Keeta support, also add:
+    npm install @x402/keeta
+
+    # For Hedera support, also add:
+    npm install @x402/hedera
+
+    # For Concordium support, also add:
+    npm install @x402/concordium
+
+    # For TON (TVM) support, also add:
+    npm install @x402/tvm
+
+    # For NEAR support, also add:
+    npm install @x402/near
+
+    # For XRPL support, also add:
+    npm install @x402/xrpl
     ```
   </Tab>
   <Tab title="Go">
@@ -59,6 +77,9 @@ There are pre-configured [examples available in the x402 repo](https://github.co
 
     # For Solana support, also add:
     pip install "x402[svm]"
+
+    # For TON (TVM) support, also add:
+    pip install "x402[tvm]"
     ```
   </Tab>
 </Tabs>
@@ -164,6 +185,89 @@ const stellarSigner = createEd25519Signer(
   process.env.STELLAR_PRIVATE_KEY!,
   "stellar:testnet"
 );
+```
+
+#### Keeta
+
+Use the Keeta SDK to instantiate a signer:
+
+```typescript
+import * as KeetaNet from "@keetanetwork/keetanet-client";
+import { toClientKeetaSigner } from "@x402/keeta";
+
+// Derive account from mnemonic
+const account = KeetaNet.lib.Account.fromSeed(
+  await KeetaNet.lib.Account.seedFromPassphrase(process.env.KEETA_MNEMONIC!),
+  0,
+);
+const keetaSigner = toClientKeetaSigner(account);
+```
+
+#### Hedera
+
+Use `@x402/hedera` to instantiate a signer:
+
+```typescript
+import { createClientHederaSigner } from "@x402/hedera";
+import { PrivateKey } from "@hiero-ledger/sdk";
+
+const hederaSigner = createClientHederaSigner(
+  process.env.HEDERA_ACCOUNT_ID!,
+  PrivateKey.fromStringECDSA(process.env.HEDERA_PRIVATE_KEY!),
+  { network: "hedera:testnet" },
+);
+```
+
+#### Concordium
+
+Use `@x402/concordium` with the Concordium web SDK to instantiate a signer:
+
+```typescript
+import { buildBasicAccountSigner, AccountAddress } from "@concordium/web-sdk";
+
+const concordiumSigner = {
+  accountAddress: AccountAddress.fromBase58(process.env.CCD_ADDRESS!),
+  signer: buildBasicAccountSigner(process.env.CCD_PRIVATE_KEY!),
+};
+```
+
+#### TON (TVM)
+
+Use `@x402/tvm` to instantiate a signer:
+
+```typescript
+import { toClientTvmSigner } from "@x402/tvm";
+import { mnemonicToPrivateKey } from "@ton/crypto";
+
+const keyPair = await mnemonicToPrivateKey(process.env.TVM_MNEMONIC!.split(" "));
+const tvmSigner = toClientTvmSigner(keyPair, {
+  network: "tvm:-3",
+  apiKey: process.env.TONCENTER_API_KEY,
+});
+```
+
+#### NEAR
+
+Use `@x402/near` to instantiate a signer:
+
+```typescript
+import { createClientNearSigner } from "@x402/near";
+
+const nearSigner = createClientNearSigner({
+  accountId: "alice.testnet",
+  secretKey: process.env.NEAR_SECRET_KEY!, // ed25519:... full-access key
+});
+```
+
+#### XRPL
+
+Use `@x402/xrpl` to instantiate a signer:
+
+```typescript
+import { Wallet } from "xrpl";
+import { createXrplWalletSigner } from "@x402/xrpl";
+
+const xrplSigner = createXrplWalletSigner(Wallet.fromSeed(process.env.XRPL_SEED!));
 ```
 
 ### 3. Make Paid Requests Automatically
@@ -439,6 +543,70 @@ You can register multiple payment schemes to handle different networks:
       "stellar:testnet"
     );
     client.register("stellar:*", new ExactStellarScheme(stellarSigner));
+
+    // For Keeta support, also add:
+    import * as KeetaNet from "@keetanetwork/keetanet-client";
+    import { ExactKeetaScheme, toClientKeetaSigner } from "@x402/keeta";
+
+    const keetaAccount = KeetaNet.lib.Account.fromSeed(
+      await KeetaNet.lib.Account.seedFromPassphrase(process.env.KEETA_MNEMONIC!),
+      0,
+    );
+    client.register("keeta:*", new ExactKeetaScheme(toClientKeetaSigner(keetaAccount)));
+
+    // For Hedera support, also add:
+    import { ExactHederaScheme } from "@x402/hedera/exact/client";
+    import { createClientHederaSigner, PrivateKey } from "@x402/hedera";
+
+    const hederaSigner = createClientHederaSigner(
+      process.env.HEDERA_ACCOUNT_ID!,
+      PrivateKey.fromStringECDSA(process.env.HEDERA_PRIVATE_KEY!),
+      { network: "hedera:testnet" },
+    );
+    client.register("hedera:*", new ExactHederaScheme(hederaSigner));
+
+    // For Concordium support, also add:
+    import { ExactConcordiumScheme } from "@x402/concordium/exact/client";
+    import { buildBasicAccountSigner, AccountAddress } from "@concordium/web-sdk";
+
+    const concordiumSigner = {
+      accountAddress: AccountAddress.fromBase58(process.env.CCD_ADDRESS!),
+      signer: buildBasicAccountSigner(process.env.CCD_PRIVATE_KEY!),
+    };
+    client.register("ccd:*", new ExactConcordiumScheme(concordiumSigner));
+
+    // For TON (TVM) support, also add:
+    import { ExactTvmScheme } from "@x402/tvm/exact/client";
+    import { toClientTvmSigner } from "@x402/tvm";
+    import { mnemonicToPrivateKey } from "@ton/crypto";
+
+    const tvmKeyPair = await mnemonicToPrivateKey(process.env.TVM_MNEMONIC!.split(" "));
+    client.register(
+      "tvm:*",
+      new ExactTvmScheme(
+        toClientTvmSigner(tvmKeyPair, {
+          network: "tvm:-3",
+          apiKey: process.env.TONCENTER_API_KEY,
+        }),
+      ),
+    );
+
+    // For NEAR support, also add:
+    import { ExactNearScheme, createClientNearSigner } from "@x402/near";
+
+    const nearSigner = createClientNearSigner({
+      accountId: "alice.testnet",
+      secretKey: process.env.NEAR_SECRET_KEY!, // ed25519:... full-access key
+    });
+    client.register("near:*", new ExactNearScheme(nearSigner));
+
+    // For XRPL support, also add:
+    import { Wallet } from "xrpl";
+    import { createXrplWalletSigner } from "@x402/xrpl";
+    import { ExactXrplScheme } from "@x402/xrpl/exact/client";
+
+    const xrplSigner = createXrplWalletSigner(Wallet.fromSeed(process.env.XRPL_SEED!));
+    client.register("xrpl:*", new ExactXrplScheme(xrplSigner));
     ```
   </Tab>
   <Tab title="Go">
@@ -483,6 +651,8 @@ You can register multiple payment schemes to handle different networks:
     from x402.mechanisms.evm.exact.register import register_exact_evm_client
     from x402.mechanisms.svm import KeypairSigner
     from x402.mechanisms.svm.exact.register import register_exact_svm_client
+    from x402.mechanisms.tvm import TVM_TESTNET, WalletV5R1Config, WalletV5R1MnemonicSigner
+    from x402.mechanisms.tvm.exact import ExactTvmClientScheme
 
 
     async def main() -> None:
@@ -496,6 +666,10 @@ You can register multiple payment schemes to handle different networks:
         svm_signer = KeypairSigner.from_base58(os.getenv("SVM_PRIVATE_KEY"))
         register_exact_svm_client(client, svm_signer)
 
+        # Register TVM scheme
+        tvm_config = WalletV5R1Config.from_private_key(TVM_TESTNET, os.getenv("TVM_PRIVATE_KEY"))
+        client.register(TVM_TESTNET, ExactTvmClientScheme(WalletV5R1MnemonicSigner(tvm_config)))
+
         async with x402HttpxClient(client) as http:
             response = await http.get("https://api.example.com/paid-endpoint")
             print(f"Response: {response.text}")
@@ -505,6 +679,86 @@ You can register multiple payment schemes to handle different networks:
     ```
   </Tab>
 </Tabs>
+
+### Spend Controls
+
+By default, the x402 client only pays recognized USD-pegged assets (e.g. USDC) and caps each payment at **$1**. You can adjust these limits when creating the client:
+
+<Tabs>
+  <Tab title="TypeScript">
+    ```typescript
+    import { x402Client } from "@x402/core/client";
+    import { ExactEvmScheme } from "@x402/evm/exact/client";
+
+    const client = x402Client.fromConfig({
+      schemes: [
+        { network: "eip155:*", client: new ExactEvmScheme(signer) },
+      ],
+      spendControls: {
+        maxAmountPerPayment: "$5",          // raise the USD cap (default: "$1")
+        allowedAssets: [
+          // opt into a non-default token with an atomic cap
+          { network: "eip155:8453", asset: "0xCustomToken", maxAmountPerPayment: "2000000" },
+        ],
+      },
+    });
+    ```
+  </Tab>
+  <Tab title="Go">
+    ```go
+    import (
+        x402 "github.com/x402-foundation/x402/go/v2"
+        evm "github.com/x402-foundation/x402/go/v2/mechanisms/evm/exact/client"
+        evmsigners "github.com/x402-foundation/x402/go/v2/signers/evm"
+    )
+
+    evmSigner, _ := evmsigners.NewClientSignerFromPrivateKey(os.Getenv("EVM_PRIVATE_KEY"))
+
+    client := x402.Newx402Client().
+        SetSpendControls(x402.SpendControls{
+            MaxAmountPerPayment: "$5", // raise the USD cap (default: "$1")
+            AllowedAssets: []x402.SpendControlAsset{
+                // opt into a non-default token with an atomic cap
+                {Network: "eip155:8453", Asset: "0xCustomToken", MaxAmountPerPayment: "2000000"},
+            },
+        }).
+        Register("eip155:*", evm.NewExactEvmScheme(evmSigner, nil))
+
+    // Or disable all spend controls:
+    // client.DisableSpendControls()
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    from x402 import x402Client, x402ClientConfig, SchemeRegistration
+    from x402.mechanisms.evm.exact import ExactEvmScheme
+    from x402.mechanisms.evm.upto import UptoEvmScheme
+
+    client = x402Client.from_config(
+        x402ClientConfig(
+            schemes=[
+                SchemeRegistration(network="eip155:*", client=ExactEvmScheme(signer)),
+            ],
+            spend_controls={
+                "max_amount_per_payment": "$5",  # raise the USD cap (default: "$1")
+                "allowed_assets": [
+                    # opt into a non-default token with an atomic cap
+                    {"network": "eip155:8453", "asset": "0xCustomToken", "max_amount_per_payment": "2000000"},
+                ],
+            },
+        )
+    )
+    ```
+  </Tab>
+</Tabs>
+
+| Option | TypeScript | Go | Python | Description |
+|--------|------------|----|--------|-------------|
+| Disable all controls | `spendControls: false` | `client.DisableSpendControls()` | `spend_controls=False` | Any asset, no caps. |
+| `maxAmountPerPayment` / `MaxAmountPerPayment` / `max_amount_per_payment` | `"$1"` default | `"$1"` default | `"$1"` default | USD ceiling on recognized USD-pegged assets. Set to `false`/`DisableMaxAmountPerPayment: true`/`False` to remove the cap. |
+| `allowedAssets` / `AllowedAssets` / `allowed_assets` | list or `true` | list or `AllowAnyAsset: true` | list or `True` | Opt into non-default tokens. Omit for default assets only; or a list of `{ network, asset }` entries with an optional atomic per-payment cap. |
+
+Spend controls run before any custom policies and before the payment payload is signed. For interactive approval flows (e.g. prompting the user), use [`onBeforePaymentCreation`](/advanced-concepts/lifecycle-hooks) hooks instead.
 
 ### Payment Schemes
 
@@ -565,7 +819,7 @@ try {
 
 ### Summary
 
-* Install x402 client packages (`@x402/fetch` or `@x402/axios`) and mechanism packages (`@x402/evm`, `@x402/svm`, `@x402/aptos`)
+* Install x402 client packages (`@x402/fetch` or `@x402/axios`) and mechanism packages (`@x402/evm`, `@x402/svm`, `@x402/tvm`, `@x402/aptos`, `@x402/keeta`, `@x402/near`, `@x402/xrpl`)
 * Create a wallet signer
 * Create an `x402Client` and register payment schemes (`exact` for fixed-price, `upto` for usage-based billing, `batch-settlement` for batched EVM micropayments when the server advertises it)
 * Use the provided wrapper/interceptor to make paid API requests
@@ -586,4 +840,4 @@ try {
 * [@x402/evm on npm](https://www.npmjs.com/package/@x402/evm)
 * [x402 Go module](https://github.com/x402-foundation/x402/tree/main/go)
 
-For questions or support, join our [Discord](https://discord.gg/cdp).
+For questions or support, join our [Slack](http://slack.x402.org/).

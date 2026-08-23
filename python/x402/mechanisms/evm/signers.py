@@ -24,7 +24,18 @@ except ImportError as e:
     ) from e
 
 from .constants import EIP1271_MAGIC_VALUE, IS_VALID_SIGNATURE_ABI, TX_STATUS_SUCCESS  # noqa: E402
+from .data_suffix import append_data_suffix  # noqa: E402
 from .types import TransactionReceipt, TypedDataDomain, TypedDataField  # noqa: E402
+
+# Gas limit for facilitator-sent transactions (settle transferWithAuthorization and
+# ERC-6492 factory deploys). Must cover larger smart-account deploys: an ERC-7579 /
+# Kernel counterfactual deploy measures ~410k gas, so a 300k limit reverted with
+# out-of-gas. 500k covers known smart-account factories with headroom.
+_DEFAULT_TX_GAS_LIMIT = 500_000
+
+# Seconds to wait for a settlement receipt before raising. Unchanged from the previous
+# hardcoded bound; override it below a platform request deadline.
+_DEFAULT_CONFIRMATION_TIMEOUT_SECONDS = 120
 
 # ERC20 ABI for balance checks
 _ERC20_BALANCE_ABI = [
@@ -263,12 +274,16 @@ class FacilitatorWeb3Signer:
         self,
         private_key: str,
         rpc_url: str,
+        confirmation_timeout_seconds: float = _DEFAULT_CONFIRMATION_TIMEOUT_SECONDS,
     ) -> None:
         """Initialize signer with private key and RPC connection.
 
         Args:
             private_key: Hex private key with or without 0x prefix.
             rpc_url: Ethereum RPC endpoint URL.
+            confirmation_timeout_seconds: Seconds to wait for a settlement receipt before
+                raising. Set below your platform's request deadline so settle returns
+                `settlement_pending` instead of the process being killed mid-wait.
 
         """
         # Normalize private key format
@@ -277,6 +292,7 @@ class FacilitatorWeb3Signer:
 
         self._account = Account.from_key(private_key)
         self._w3 = Web3(Web3.HTTPProvider(rpc_url))
+        self._confirmation_timeout_seconds = confirmation_timeout_seconds
 
         # Add PoA middleware for testnets (Base, Polygon, etc.)
         self._w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
@@ -469,6 +485,7 @@ class FacilitatorWeb3Signer:
         abi: list[dict[str, Any]],
         function_name: str,
         *args: Any,
+        data_suffix: str | None = None,
     ) -> str:
         """Execute a smart contract transaction.
 
@@ -477,6 +494,7 @@ class FacilitatorWeb3Signer:
             abi: Contract ABI.
             function_name: Function to call.
             *args: Function arguments.
+            data_suffix: Optional hex suffix appended to the encoded calldata.
 
         Returns:
             Transaction hash.
@@ -492,10 +510,16 @@ class FacilitatorWeb3Signer:
             {
                 "from": self._account.address,
                 "nonce": self._reserve_nonce(),
-                "gas": 300000,
+                "gas": _DEFAULT_TX_GAS_LIMIT,
                 "gasPrice": self._w3.eth.gas_price,
             }
         )
+
+        if data_suffix:
+            calldata = tx["data"]
+            if isinstance(calldata, (bytes, bytearray)):
+                calldata = "0x" + bytes(calldata).hex()
+            tx["data"] = append_data_suffix(calldata, data_suffix)
 
         # Sign and send
         signed_tx = self._account.sign_transaction(tx)
@@ -518,7 +542,7 @@ class FacilitatorWeb3Signer:
             "to": Web3.to_checksum_address(to),
             "data": data,
             "nonce": self._reserve_nonce(),
-            "gas": 300000,
+            "gas": _DEFAULT_TX_GAS_LIMIT,
             "gasPrice": self._w3.eth.gas_price,
         }
 
@@ -530,21 +554,29 @@ class FacilitatorWeb3Signer:
     def wait_for_transaction_receipt(self, tx_hash: str) -> TransactionReceipt:
         """Wait for a transaction to be mined.
 
+        Bounded by `confirmation_timeout_seconds` from the constructor.
+
         Args:
             tx_hash: Transaction hash to wait for.
 
         Returns:
             Transaction receipt.
+
+        Raises:
+            web3.exceptions.TimeExhausted: The receipt did not arrive in time.
         """
         if not tx_hash.startswith("0x"):
             tx_hash = "0x" + tx_hash
 
-        receipt = self._w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+        receipt = self._w3.eth.wait_for_transaction_receipt(
+            tx_hash, timeout=self._confirmation_timeout_seconds
+        )
 
         return TransactionReceipt(
             status=TX_STATUS_SUCCESS if receipt["status"] == 1 else 0,
             block_number=receipt["blockNumber"],
             tx_hash=tx_hash,
+            logs=list(receipt.get("logs") or []),
         )
 
     def get_balance(self, address: str, token_address: str) -> int:

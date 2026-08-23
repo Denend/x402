@@ -211,7 +211,9 @@ class BeforeVerifyHookProvider(Protocol):
 class AfterVerifyHookProvider(Protocol):
     def after_verify(
         self, context: VerifyResultContext
-    ) -> SkipHandlerResult | None | Awaitable[SkipHandlerResult | None]: ...
+    ) -> (
+        AbortResult | SkipHandlerResult | None | Awaitable[AbortResult | SkipHandlerResult | None]
+    ): ...
 
 
 class OnVerifyFailureHookProvider(Protocol):
@@ -251,8 +253,7 @@ class SchemeNetworkServer(Protocol):
     Implementations handle price parsing and requirement enhancement for specific schemes.
     Does NOT verify/settle - that's delegated to FacilitatorClient.
 
-    Note: parse_price handles USD→atomic conversion for the scheme.
-    This logic lives in the scheme implementation (e.g., EVM), not standalone.
+    Note: parse_price orchestrates shared helpers plus scheme asset/extra.
 
     Example:
         ```python
@@ -282,7 +283,7 @@ class SchemeNetworkServer(Protocol):
     def parse_price(self, price: Price, network: Network) -> AssetAmount:
         """Convert Money or AssetAmount to normalized AssetAmount.
 
-        USD→atomic conversion logic lives here, not as a standalone utility.
+        parse_price orchestrates shared helpers plus scheme asset/extra.
 
         Args:
             price: Price as Money ("$1.50", 1.50) or AssetAmount.
@@ -310,6 +311,39 @@ class SchemeNetworkServer(Protocol):
 
         Returns:
             Enhanced payment requirements.
+        """
+        ...
+
+
+class FacilitatorSupportValidator(Protocol):
+    """Optional scheme hook to validate facilitator capabilities at startup.
+
+    Schemes that delegate a capability to the facilitator (e.g. batch-settlement
+    delegating the receiver-authorizer role) implement this to fail fast during
+    ``initialize()`` when the facilitator does not advertise that capability. The
+    server discovers it via attribute lookup, so schemes that do not need it can
+    omit the method entirely.
+    """
+
+    def validate_facilitator_support(
+        self,
+        network: Network,
+        supported_kind: SupportedKind,
+        facilitator_extensions: list[str],
+    ) -> str | None:
+        """Validate facilitator capabilities for this scheme/network.
+
+        Invoked during ``initialize()``, only when the facilitator supports the
+        scheme.
+
+        Args:
+            network: The network identifier being validated.
+            supported_kind: The facilitator's advertised kind for this scheme/network.
+            facilitator_extensions: Extensions advertised by the facilitator.
+
+        Returns:
+            A human-readable problem message when the configuration cannot be
+            fulfilled, or None when valid.
         """
         ...
 

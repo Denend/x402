@@ -1,11 +1,12 @@
 import { Account, Ed25519PrivateKey, PrivateKey, PrivateKeyVariants } from "@aptos-labs/ts-sdk";
+import * as KeetaNet from "@keetanetwork/keetanet-client";
 import { base58 } from "@scure/base";
 import { createKeyPairSignerFromBytes } from "@solana/kit";
 import { toFacilitatorAptosSigner } from "@x402/aptos";
 import { ExactAptosScheme } from "@x402/aptos/exact/facilitator";
 import { x402Facilitator } from "@x402/core/facilitator";
 import { Network } from "@x402/core/types";
-import { type AuthorizerSigner, toFacilitatorEvmSigner } from "@x402/evm";
+import { toFacilitatorEvmSigner } from "@x402/evm";
 import { BatchSettlementEvmScheme } from "@x402/evm/batch-settlement/facilitator";
 import { ExactEvmScheme } from "@x402/evm/exact/facilitator";
 import { ExactEvmSchemeV1 } from "@x402/evm/exact/v1/facilitator";
@@ -16,13 +17,17 @@ import {
 } from "@x402/extensions";
 import { BuilderCodeFacilitatorExtension } from "@x402/extensions/builder-code";
 import {
+  AccountId as HederaAccountId,
   PrivateKey as HederaPrivateKey,
   createHederaClient,
   createHederaPreflightTransfer,
   createHederaSignAndSubmitTransaction,
+  createHederaVerifyPayerSignature,
   toFacilitatorHederaSigner,
 } from "@x402/hedera";
 import { ExactHederaScheme } from "@x402/hedera/exact/facilitator";
+import { toFacilitatorKeetaSigner, KEETA_TESTNET_CAIP2 } from "@x402/keeta";
+import { ExactKeetaScheme } from "@x402/keeta/exact/facilitator";
 import { createEd25519Signer } from "@x402/stellar";
 import { ExactStellarScheme } from "@x402/stellar/exact/facilitator";
 import { toFacilitatorSvmSigner } from "@x402/svm";
@@ -30,12 +35,14 @@ import { ExactSvmScheme } from "@x402/svm/exact/facilitator";
 import { ExactSvmSchemeV1 } from "@x402/svm/exact/v1/facilitator";
 import { toFacilitatorAvmSigner } from "@x402/avm";
 import { ExactAvmScheme } from "@x402/avm/exact/facilitator";
+import { XRPL_TESTNET } from "@x402/xrpl";
+import { ExactXrplScheme } from "@x402/xrpl/exact/facilitator";
 import { createWalletClient, http, publicActions } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
 
 /**
- * Initialize and configure the x402 facilitator with EVM, SVM, AVM, Aptos, Stellar, and Hedera support
+ * Initialize and configure the x402 facilitator with EVM, SVM, AVM, Aptos, Stellar, Hedera, Keeta, and XRPL support
  * This is called lazily on first use to support Next.js module loading
  *
  * @returns A configured x402Facilitator instance
@@ -104,12 +111,6 @@ async function createFacilitator(): Promise<x402Facilitator> {
     getCode: (args: { address: `0x${string}` }) => viemClient.getCode(args),
   });
 
-  const receiverAuthorizerSigner: AuthorizerSigner = {
-    address: evmAccount.address,
-    signTypedData: params =>
-      evmAccount.signTypedData(params as Parameters<typeof evmAccount.signTypedData>[0]),
-  };
-
   // Initialize the SVM account from private key
   const svmAccount = await createKeyPairSignerFromBytes(
     base58.decode(process.env.FACILITATOR_SVM_PRIVATE_KEY as string),
@@ -133,7 +134,7 @@ async function createFacilitator(): Promise<x402Facilitator> {
       new ExactEvmSchemeV1(evmSigner, { eip6492AllowedFactories }),
     )
     .register("eip155:84532", new UptoEvmScheme(evmSigner))
-    .register("eip155:84532", new BatchSettlementEvmScheme(evmSigner, receiverAuthorizerSigner))
+    .register("eip155:84532", new BatchSettlementEvmScheme(evmSigner))
     .register(
       "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
       new ExactSvmScheme(svmSigner, undefined, { enableSmartWalletVerification: true }),
@@ -144,7 +145,7 @@ async function createFacilitator(): Promise<x402Facilitator> {
   if (avmPrivateKey) {
     const avmSigner = toFacilitatorAvmSigner(avmPrivateKey);
     facilitator.register(
-      "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=",
+      "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDe",
       new ExactAvmScheme(avmSigner),
     );
   }
@@ -159,6 +160,32 @@ async function createFacilitator(): Promise<x402Facilitator> {
     const aptosAccount = Account.fromPrivateKey({ privateKey: aptosPrivateKey });
     const aptosSigner = toFacilitatorAptosSigner(aptosAccount);
     facilitator.register("aptos:2", new ExactAptosScheme(aptosSigner));
+  }
+
+  // Optionally register Keeta if configured
+  if (process.env.FACILITATOR_KEETA_MNEMONIC) {
+    const amountSigners = parseInt(process.env.FACILITATOR_KEETA_SIGNER_AMOUNT ?? "1");
+    const keetaAccounts = [];
+
+    for (let i = 0; i < amountSigners; i++) {
+      const account = KeetaNet.lib.Account.fromSeed(
+        await KeetaNet.lib.Account.seedFromPassphrase(process.env.FACILITATOR_KEETA_MNEMONIC),
+        i,
+      );
+      keetaAccounts.push(account);
+    }
+
+    const keetaSigner = toFacilitatorKeetaSigner(keetaAccounts);
+    facilitator.register(KEETA_TESTNET_CAIP2, new ExactKeetaScheme(keetaSigner, console));
+
+    // Tear down signer on shutdown so the process exits cleanly.
+    // createFacilitator() runs once as a lazy singleton, so these handlers only register once.
+    const destroyKeetaSigner = async () => {
+      await keetaSigner.destroy();
+      // We don't process.exit here to allow other cleanups to run as well.
+    };
+    process.once("SIGINT", destroyKeetaSigner);
+    process.once("SIGTERM", destroyKeetaSigner);
   }
 
   // Optionally register Stellar if configured
@@ -185,7 +212,11 @@ async function createFacilitator(): Promise<x402Facilitator> {
       process.env.FACILITATOR_HEDERA_PRIVATE_KEY,
     );
     const hederaFeePayer = process.env.FACILITATOR_HEDERA_ACCOUNT_ID;
-    const buildHederaClient = (network: string) => createHederaClient(network);
+    const buildHederaClient = (network: string) => {
+      const client = createHederaClient(network);
+      client.setOperator(HederaAccountId.fromString(hederaFeePayer), hederaFeePayerKey);
+      return client;
+    };
 
     const hederaSigner = toFacilitatorHederaSigner({
       getAddresses: () => [hederaFeePayer],
@@ -193,12 +224,24 @@ async function createFacilitator(): Promise<x402Facilitator> {
         buildHederaClient,
         hederaFeePayerKey,
       ),
-      preflightTransfer: createHederaPreflightTransfer(buildHederaClient),
+      verifyPayerSignature: createHederaVerifyPayerSignature(),
+      preflightTransfer: createHederaPreflightTransfer(),
     });
 
     facilitator.register(
       "hedera:testnet",
       new ExactHederaScheme(hederaSigner, { aliasPolicy: "reject" }),
+    );
+  }
+
+  // Optionally register XRPL if enabled. Unlike the other networks, no
+  // facilitator key or funds are needed: the payer signs the transaction and
+  // pays its fee, and the facilitator only verifies and submits the signed blob.
+  if (process.env.FACILITATOR_XRPL_ENABLED === "true") {
+    const xrplWsUrl = process.env.FACILITATOR_XRPL_TESTNET_WS_URL;
+    facilitator.register(
+      XRPL_TESTNET,
+      new ExactXrplScheme(xrplWsUrl ? { wsUrlByNetwork: { [XRPL_TESTNET]: xrplWsUrl } } : {}),
     );
   }
 

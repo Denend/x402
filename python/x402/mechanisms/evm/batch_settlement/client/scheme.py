@@ -18,6 +18,7 @@ from ....evm.signer import (
     ClientEvmSignerWithReadContract,
     ClientEvmSignerWithSignTransaction,
 )
+from ...default_assets import find_default_asset
 from ...utils import get_evm_chain_id, normalize_address
 from ..constants import SCHEME_BATCH_SETTLEMENT
 from ..types import ChannelConfig, VoucherPayload
@@ -46,11 +47,11 @@ from .voucher import sign_voucher
 
 
 def _wrap_if_local_account(signer: Any) -> ClientEvmSigner:
-    """Auto-wrap an `eth_account` LocalAccount in `EthAccountSigner`."""
+    """Auto-wrap an eth_account-compatible signer (any `BaseAccount`) in `EthAccountSigner`."""
     try:
-        from eth_account.signers.local import LocalAccount
+        from eth_account.signers.base import BaseAccount
 
-        if isinstance(signer, LocalAccount):
+        if isinstance(signer, BaseAccount):
             from ....evm.signers import EthAccountSigner
 
             return EthAccountSigner(signer)
@@ -97,6 +98,7 @@ class BatchSettlementEvmScheme:
     """
 
     scheme = SCHEME_BATCH_SETTLEMENT
+    find_default_asset = staticmethod(find_default_asset)
 
     def __init__(
         self,

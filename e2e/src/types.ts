@@ -1,34 +1,33 @@
-import type { NetworkSet } from './networks/networks';
+import type { NetworkSet, ProtocolFamily } from './networks/networks';
 
-export type ProtocolFamily = 'evm' | 'svm' | 'avm' | 'aptos' | 'hedera' | 'stellar' | 'tvm';
+export type { ProtocolFamily } from './networks/networks';
 export type Transport = 'http' | 'mcp';
 export type PaymentScheme = 'exact' | 'upto' | 'batch-settlement';
-export type AssetTransferMethod = 'eip3009' | 'permit2';
+export type AssetTransferMethod = 'eip3009' | 'permit2' | 'sequence' | 'ticketSequence';
 
 /**
- * Resolved asset transfer for an EVM endpoint.
+ * Resolved asset transfer method for an endpoint.
  */
 export function endpointAssetTransferMethod(endpoint: TestEndpoint): AssetTransferMethod | undefined {
   const family = endpoint.protocolFamily ?? 'evm';
-  if (family !== 'evm') {
-    return undefined;
-  }
   if (endpoint.assetTransferMethod != null) {
     return endpoint.assetTransferMethod;
   }
-  const scheme = endpoint.scheme ?? 'exact';
-  return scheme === 'upto' ? 'permit2' : 'eip3009';
+  if (family === 'evm') {
+    const scheme = endpoint.scheme ?? 'exact';
+    return scheme === 'upto' ? 'permit2' : 'eip3009';
+  }
+  if (family === 'xrpl') {
+    return 'sequence';
+  }
+  return undefined;
 }
 
 /**
- * Resolved payment scheme for an EVM endpoint.
- * Defaults to `exact` when omitted (non-batch endpoints).
+ * Resolved payment scheme for an endpoint.
+ * Defaults to `exact` when omitted.
  */
-export function endpointPaymentScheme(endpoint: TestEndpoint): PaymentScheme | undefined {
-  const family = endpoint.protocolFamily ?? 'evm';
-  if (family !== 'evm') {
-    return undefined;
-  }
+export function endpointPaymentScheme(endpoint: TestEndpoint): PaymentScheme {
   return endpoint.scheme ?? 'exact';
 }
 
@@ -66,57 +65,25 @@ export interface BatchSettlementClientConfig {
   /** Optional alternate EOA used to sign vouchers (deposits still use the main client signer). */
   voucherSignerPrivateKey?: string;
 }
-
-/** Scheme-specific knobs the harness forwards to a server for a batch-settlement scenario. */
-export interface BatchSettlementServerConfig {
-  /** Optional EOA private key the server uses as a self-managed receiver authorizer. */
-  receiverAuthorizerPrivateKey: string;
-}
-
 export interface ClientConfig {
-  evmPrivateKey: string;
-  svmPrivateKey: string;
-  avmPrivateKey: string;
-  aptosPrivateKey: string;
-  hederaAccountId: string;
-  hederaPrivateKey: string;
-  stellarPrivateKey: string;
-  tvmPrivateKey: string;
   serverUrl: string;
   endpointPath: string;
-  evmNetwork: string;
-  evmRpcUrl: string;
-  svmNetwork: string;
-  svmRpcUrl: string;
-  hederaNetwork: string;
-  hederaNodeUrl: string;
-  tvmNetwork: string;
-  tvmRpcUrl: string;
+  networks: NetworkSet;
   batchSettlement?: BatchSettlementClientConfig;
 }
 
 export interface ServerConfig {
   port: number;
-  evmPayTo: string;
-  svmPayTo: string;
-  avmPayTo: string;
-  aptosPayTo: string;
-  hederaPayTo: string;
-  hederaAsset?: string;
-  hederaAmount?: string;
-  stellarPayTo: string;
-  tvmPayTo: string;
   networks: NetworkSet;
+  /** When set, only forward SERVER_* addresses for these families */
+  enabledFamilies?: ProtocolFamily[];
   facilitatorUrl?: string;
   mockFacilitatorUrl?: string;
-  batchSettlement?: BatchSettlementServerConfig;
 }
 
 export interface ServerProxy {
   start(config: ServerConfig): Promise<void>;
   stop(): Promise<void>;
-  getHealthUrl(): string;
-  getProtectedPath(): string;
   getUrl(): string;
 }
 

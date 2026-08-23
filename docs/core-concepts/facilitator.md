@@ -22,6 +22,18 @@ By using a facilitator, servers do not need to maintain direct blockchain connec
 
 The facilitator does not hold funds or act as a custodian - it performs verification and execution of onchain transactions based on signed payloads provided by clients.
 
+### Choosing a Facilitator Path
+
+There is no single facilitator deployment model for every x402 integration. In practice, most teams should choose one of three paths:
+
+| Goal | Recommended path |
+| ---- | ---------------- |
+| Fastest testnet or local quickstart | Use the public `x402.org` facilitator |
+| Managed production deployment | Use a production facilitator provider that supports your target network |
+| Full operational control | Run your own facilitator or [self-facilitate](https://github.com/x402-foundation/x402/tree/main/examples/typescript/servers/self-facilitation) inside your resource server |
+
+**Important:** the public `x402.org` facilitator is intended for development and testnet workflows. Do not assume it is the default path for production mainnet routes. For mainnet deployments, use a production facilitator that supports your network, run your own facilitator, or self-facilitate.
+
 ### Why Use a Facilitator?
 
 Using a facilitator provides:
@@ -50,6 +62,26 @@ Multiple facilitators are live in production, supporting various networks includ
 10. `Facilitator server` waits for the payment to be confirmed on the blockchain.
 11. `Facilitator server` returns a `Payment Execution Response` to the resource server.
 12. `Resource server` returns a response to the `Client` with a `PAYMENT-RESPONSE` header containing the `Settlement Response` as Base64-encoded JSON. On success, this is a `200 OK` with the requested resource. On failure, this is a `402 Payment Required` with error details.
+
+### Settlement Pending (EVM)
+
+When an EVM settlement transaction is broadcast but its confirmation cannot be established — for example, due to an RPC error or a timeout while waiting for the receipt — the facilitator returns `settlement_pending` instead of a terminal failure. This is a **non-terminal** error: the transaction may still confirm on chain. The `SettlementResponse` carries the broadcast transaction hash in `transaction` and the network in `network`, so callers can reconcile on chain before deciding whether to retry.
+
+This applies to the `exact`, `upto`, and `batch-settlement` EVM schemes (v2 only).
+
+**Facilitators deployed behind a platform request deadline** (serverless functions, gateway timeouts) should bound the receipt wait below that deadline. If the process is killed mid-wait, the caller receives a 5xx with no transaction hash instead of `settlement_pending` with a hash to reconcile against.
+
+In TypeScript, pass `confirmationTimeoutMs` to `toFacilitatorEvmSigner` to set this bound:
+
+```typescript
+import { toFacilitatorEvmSigner } from "@x402/evm";
+
+const evmSigner = toFacilitatorEvmSigner(walletClient, {
+  confirmationTimeoutMs: 25_000, // set a few seconds below your platform deadline
+});
+```
+
+The default is `180_000` ms (3 minutes), matching viem's own default. In Python, pass `confirmation_timeout_seconds` to `FacilitatorWeb3Signer` (default `120`).
 
 ### Duplicate Settlement (Solana)
 
