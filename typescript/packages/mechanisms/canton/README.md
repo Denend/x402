@@ -59,7 +59,7 @@ import { registerExactCantonScheme } from "@x402/canton/exact/facilitator";
 registerExactCantonScheme(facilitator, {
   signer: facilitatorCantonSigner,
   synchronizerId: "global-domain::1220…",
-  networks: "canton:global-domain::1220…",
+  networks: "canton:mainnet",
 });
 ```
 
@@ -68,7 +68,7 @@ registerExactCantonScheme(facilitator, {
 ```jsonc
 {
   "scheme": "exact",
-  "network": "canton:global-domain::1220…",
+  "network": "canton:mainnet",
   "amount": "100000000",          // atomic units (1 CC = 1e10)
   "asset": "CC",                  // or a registry token symbol
   "payTo": "merchant::1220…",

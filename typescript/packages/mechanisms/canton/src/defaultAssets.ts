@@ -8,6 +8,7 @@
  */
 import type { DefaultAsset, Network } from "@x402/core/types";
 import { CANTON_COIN_DECIMALS, CANTON_COIN_SYMBOL } from "./constants.js";
+import { isCantonNetwork } from "./types.js";
 
 /** The Canton Coin default asset (per-network, but identity is symbolic). */
 export const CANTON_COIN_ASSET: DefaultAsset = {
@@ -24,7 +25,7 @@ export const CANTON_COIN_ASSET: DefaultAsset = {
  * @returns The default asset entry (Canton Coin), or undefined when unknown.
  */
 export function findDefaultAsset(asset: string, network: Network): DefaultAsset | undefined {
-  if (!network.startsWith("canton:")) return undefined;
+  if (!isCantonNetwork(network)) return undefined;
   if (asset === CANTON_COIN_SYMBOL || asset === "canton-coin") return CANTON_COIN_ASSET;
   return undefined;
 }

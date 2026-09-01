@@ -24,8 +24,7 @@ const CC = JSON.parse(readFileSync(FIX + "mainnet-0.1.21.json", "utf8")).transfe
 };
 
 const FAC = "facilitator::1220" + "ff".repeat(32);
-const NETWORK =
-  "canton:global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc" as const;
+const NETWORK = "canton:mainnet" as const;
 
 // Run inside the fixture's ledger window so verify-before-sign (client) and the
 // facilitator's timing checks — both read the wall clock — accept the capture.
