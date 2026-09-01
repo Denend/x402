@@ -18,6 +18,7 @@ import { CANTON_CAIP_FAMILY } from "../../constants.js";
 import type { CantonErrorCode } from "../../types.js";
 import type { FacilitatorCantonSigner, CantonSchemeConfig } from "../../signer.js";
 import { verifyInlineTransfer } from "./verify-inline.js";
+import { SubmissionOutcomeUnknownError } from "../../ledger/transfer-factory.js";
 
 /** Options for the Canton facilitator scheme. */
 export interface CantonFacilitatorOptions extends CantonSchemeConfig {
@@ -127,7 +128,14 @@ export class ExactCantonScheme implements SchemeNetworkFacilitator {
           ? { instrumentAdmin }
           : {}),
       });
-    } catch {
+    } catch (err) {
+      // An unknown outcome (execute committed but the result was unreadable) is
+      // NOT a definite rejection: reporting it as the retryable execute failure
+      // would invite the payer to re-pay. Surface it as the non-retryable
+      // ledger-read error instead.
+      if (err instanceof SubmissionOutcomeUnknownError) {
+        return this.settleFailure("unexpected_canton_ledger_error", network, v.payer);
+      }
       return this.settleFailure("invalid_exact_canton_execute_failed", network, v.payer);
     }
 
