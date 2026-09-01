@@ -12,6 +12,7 @@ import { ExactCantonScheme as ClientScheme } from "../../src/exact/client/scheme
 import { ExactCantonScheme as ServerScheme } from "../../src/exact/server/scheme.js";
 import { ExactCantonScheme as FacilitatorScheme } from "../../src/exact/facilitator/scheme.js";
 import { decodePrepared } from "../../src/prepared-transfer.js";
+import { SubmissionOutcomeUnknownError } from "../../src/ledger/transfer-factory.js";
 import type { ClientCantonSigner, FacilitatorCantonSigner } from "../../src/signer.js";
 
 const FIX = fileURLToPath(new URL("../../src/__fixtures__/", import.meta.url));
@@ -25,6 +26,7 @@ const CC = JSON.parse(readFileSync(FIX + "mainnet-0.1.21.json", "utf8")).transfe
 
 const FAC = "facilitator::1220" + "ff".repeat(32);
 const NETWORK = "canton:mainnet" as const;
+const SYNC = "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc";
 
 // Run inside the fixture's ledger window so verify-before-sign (client) and the
 // facilitator's timing checks — both read the wall clock — accept the capture.
@@ -63,6 +65,32 @@ function facilitatorSigner(executes: string[]): FacilitatorCantonSigner {
       return { updateId: "1220-settled", transferred: true };
     },
   };
+}
+
+/** Steps 1–2 of the flow: the server's enhanced 402 and the client's signed
+ *  inline payload, ready to hand a facilitator for verify/settle. */
+async function buildFlow(): Promise<{ reqs: PaymentRequirements; payload: unknown }> {
+  const server = new ServerScheme();
+  const supported: SupportedKind = {
+    x402Version: 2,
+    scheme: "exact",
+    network: NETWORK,
+    extra: { feePayer: FAC, synchronizerId: SYNC },
+  };
+  const baseReqs: PaymentRequirements = {
+    scheme: "exact",
+    network: NETWORK,
+    amount: "100000000",
+    asset: "CC",
+    payTo: CC.receiver,
+    maxTimeoutSeconds: 60,
+    extra: { instrumentId: CC.instrumentId, executeBeforeSeconds: 120 },
+  };
+  const reqs = await server.enhancePaymentRequirements(baseReqs, supported, []);
+  const client = new ClientScheme(clientSigner());
+  const env = await client.createPaymentPayload(2, reqs);
+  const payload = { x402Version: 2, accepted: reqs, payload: env.payload };
+  return { reqs, payload };
 }
 
 describe("exact/canton integration (CC, stubbed signers)", () => {
@@ -114,5 +142,39 @@ describe("exact/canton integration (CC, stubbed signers)", () => {
     expect(settle.success).toBe(true);
     expect(settle.transaction).toBe("1220-settled");
     expect(executes).toHaveLength(1);
+  });
+
+  // Fund-safety: an execute that COMMITTED but whose outcome could not be read is
+  // not a rejection. Reporting it as the retryable execute-failed reason would
+  // invite the payer to pay again, so settle must surface the non-retryable
+  // ledger-read error instead.
+  it("settle maps an unknown execute outcome to the non-retryable ledger error", async () => {
+    const { reqs, payload } = await buildFlow();
+    const signer: FacilitatorCantonSigner = {
+      ...facilitatorSigner([]),
+      executeSubmission: async () => {
+        throw new SubmissionOutcomeUnknownError(new Error("completion read timed out"));
+      },
+    };
+    const facilitator = new FacilitatorScheme(signer, { synchronizerId: SYNC });
+
+    const settle = await facilitator.settle(payload as never, reqs);
+    expect(settle.success).toBe(false);
+    expect(settle.errorReason).toBe("unexpected_canton_ledger_error");
+  });
+
+  it("settle maps a definite execute rejection to the retryable execute-failed error", async () => {
+    const { reqs, payload } = await buildFlow();
+    const signer: FacilitatorCantonSigner = {
+      ...facilitatorSigner([]),
+      executeSubmission: async () => {
+        throw new Error("SUBMISSION_FAILED: rejected");
+      },
+    };
+    const facilitator = new FacilitatorScheme(signer, { synchronizerId: SYNC });
+
+    const settle = await facilitator.settle(payload as never, reqs);
+    expect(settle.success).toBe(false);
+    expect(settle.errorReason).toBe("invalid_exact_canton_execute_failed");
   });
 });
