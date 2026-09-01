@@ -24,50 +24,12 @@ export const CC_ATOMIC_SCALE = 10;
 const SCALE_FACTOR = 10n ** BigInt(CC_ATOMIC_SCALE);
 
 /**
- * Convert a Daml Decimal CC string (e.g. `"0.1"`, `"1.0000000000"`) to integer
- * atomic units as a decimal string (e.g. `"1000000000"`, `"10000000000"`).
- *
- * Fail-CLOSED: throws on a non-numeric value, a negative value, or a fractional
- * part with MORE than `CC_ATOMIC_SCALE` significant digits (which would lose
- * precision) — a malformed amount must never silently produce a wrong integer.
- * Trailing zeros within the scale are fine (`"0.1"` and `"0.1000000000"` both
- * → `"1000000000"`).
- *
- * @param dec
- */
-export function decimalToAtomicCC(dec: string): string {
-  if (typeof dec !== "string") {
-    throw new Error(`invalid CC decimal amount: ${JSON.stringify(dec)}`);
-  }
-  const m = /^(\d+)(?:\.(\d+))?$/.exec(dec.trim());
-  if (!m) {
-    throw new Error(`invalid CC decimal amount: ${JSON.stringify(dec)}`);
-  }
-  const whole = m[1] ?? "0";
-  const fracRaw = m[2] ?? "";
-  // Reject any significant digit past the scale (lossy). Trailing zeros that
-  // exceed the scale are NOT significant, so trim them before the length check.
-  const fracTrimmed = fracRaw.replace(/0+$/, "");
-  if (fracTrimmed.length > CC_ATOMIC_SCALE) {
-    throw new Error(
-      `CC decimal amount ${JSON.stringify(dec)} has more than ${CC_ATOMIC_SCALE} ` +
-        `fractional digits — converting to atomic units would lose precision`,
-    );
-  }
-  const frac = fracRaw.slice(0, CC_ATOMIC_SCALE).padEnd(CC_ATOMIC_SCALE, "0");
-  const atomic = BigInt(whole) * SCALE_FACTOR + BigInt(frac || "0");
-  return atomic.toString();
-}
-
-/**
  * Convert integer atomic units (decimal string, e.g. `"1"`, `"10000000000"`) to
  * a fixed-scale Daml Decimal CC string with exactly `CC_ATOMIC_SCALE` fractional
  * digits (e.g. `"0.0000000001"`, `"1.0000000000"`).
  *
  * Fail-CLOSED: throws on a non-integer / non-numeric / negative input. The
- * output is the canonical fixed-scale form the Token Standard ledger uses, so
- * `decimalToAtomicCC(atomicToDecimalCC(x)) === x` and
- * `atomicToDecimalCC(decimalToAtomicCC(d))` is `d` normalized to 10 dp.
+ * output is the canonical fixed-scale form the Token Standard ledger uses.
  *
  * @param atomic
  */
@@ -119,75 +81,4 @@ export function schemeIsAtomic(scheme: string): boolean {
  */
 export function wireAmountToLedgerDecimal(scheme: string, wireAmount: string): string {
   return schemeIsAtomic(scheme) ? atomicToDecimalCC(wireAmount) : wireAmount;
-}
-
-/**
- * Inverse of `wireAmountToLedgerDecimal`: given an on-ledger Daml Decimal,
- * produce the WIRE amount. Under scheme "exact" (atomic) => `decimalToAtomicCC`;
- * any unrecognized scheme => passthrough. Used by the client builder / signer
- * seam when emitting the wire amount.
- *
- * @param scheme
- * @param decimal
- */
-export function ledgerDecimalToWireAmount(scheme: string, decimal: string): string {
-  return schemeIsAtomic(scheme) ? decimalToAtomicCC(decimal) : decimal;
-}
-
-/**
- * Canonical VALUE-equality of two on-ledger Daml CC Decimal strings: compares
- * by BigInt atomic units so "0.1" ≡ "0.1000000000" and a 10x/0.1x difference
- * provably never folds. Fail-CLOSED: a malformed Decimal on either side throws
- * (via `decimalToAtomicCC`), so a comparison can never silently pass on junk.
- * This is the exactness guarantee the spec asks for at every amount-compare site
- * (replaces a raw string `!==`).
- *
- * @param a
- * @param b
- */
-export function ledgerDecimalEquals(a: string, b: string): boolean {
-  return decimalToAtomicCC(a) === decimalToAtomicCC(b);
-}
-
-/**
- * Non-throwing, FAIL-CLOSED variant of `ledgerDecimalEquals` for the
- * facilitator amount-validation arms: returns `true` only when both inputs are
- * well-formed Daml CC Decimals of equal value; a malformed/junk value on either
- * side returns `false` (→ amount_mismatch) instead of throwing. Use this at the
- * pure validator sites (validateTransferCommand / validateAllocation /
- * validateCip56*) that must map to a discriminated reject, never a 5xx.
- *
- * @param a
- * @param b
- */
-export function ledgerDecimalsMatch(a: string, b: string): boolean {
-  try {
-    return ledgerDecimalEquals(a, b);
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Exact sum of ledger Decimal strings — BigInt on the atomic scale, never a
- * float. A float sum of a batch of holdings can land an atomic off the
- * on-ledger total, and verify-before-sign compares the intended amount against
- * the signed bytes digit-for-digit. Throws on a malformed input (fail-closed).
- *
- * @param values
- */
-export function sumLedgerDecimals(values: readonly string[]): string {
-  let acc = 0n;
-  for (const v of values) acc += BigInt(decimalToAtomicCC(v));
-  return atomicToDecimalCC(acc.toString());
-}
-
-/** Exact three-way compare of two ledger Decimal strings (short forms such as
- * @param a
- * @param b
- *  "0.02" are fine). Throws on a malformed input. */
-export function compareLedgerDecimals(a: string, b: string): -1 | 0 | 1 {
-  const x = BigInt(decimalToAtomicCC(a));
-  const y = BigInt(decimalToAtomicCC(b));
-  return x < y ? -1 : x > y ? 1 : 0;
 }
