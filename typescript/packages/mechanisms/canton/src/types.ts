@@ -19,7 +19,11 @@
 export type CantonNetwork = "canton:mainnet" | "canton:testnet" | "canton:devnet";
 
 /** The set of valid Canton network identifiers. */
-const CANTON_NETWORKS: readonly CantonNetwork[] = ["canton:mainnet", "canton:testnet", "canton:devnet"];
+const CANTON_NETWORKS: readonly CantonNetwork[] = [
+  "canton:mainnet",
+  "canton:testnet",
+  "canton:devnet",
+];
 
 /**
  * True when a network string is a Canton network identifier.
