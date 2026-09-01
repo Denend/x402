@@ -10,17 +10,25 @@
  * `extra.instrumentId.admin`.
  */
 
-/** CAIP-2-style Canton network identifier: `canton:<global-synchronizer-id>`. */
-export type CantonNetwork = `canton:${string}`;
+/**
+ * CAIP-2-style Canton network identifier. Canton's Network-of-Networks is one
+ * interoperable MainNet, so the identifier names the tier — `canton:mainnet`,
+ * `canton:testnet`, or `canton:devnet` — and the specific Global Synchronizer
+ * is carried separately in `extra.synchronizerId`.
+ */
+export type CantonNetwork = "canton:mainnet" | "canton:testnet" | "canton:devnet";
+
+/** The set of valid Canton network identifiers. */
+const CANTON_NETWORKS: readonly CantonNetwork[] = ["canton:mainnet", "canton:testnet", "canton:devnet"];
 
 /**
- * True when a network string is a Canton network (`canton:*`).
+ * True when a network string is a Canton network identifier.
  *
  * @param network - The CAIP-2 network identifier to test.
- * @returns Whether the network is a Canton network.
+ * @returns Whether the network is one of the three Canton networks.
  */
-export function isCantonNetwork(network: string): boolean {
-  return network.startsWith("canton:");
+export function isCantonNetwork(network: string): network is CantonNetwork {
+  return (CANTON_NETWORKS as readonly string[]).includes(network);
 }
 
 /** The single on-ledger settlement method: a token-standard

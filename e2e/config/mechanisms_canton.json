@@ -22,12 +22,12 @@
   },
   "testnet": {
     "name": "Canton DevNet",
-    "caip2": "canton:global-domain::devnet",
+    "caip2": "canton:devnet",
     "rpcUrlRequired": true
   },
   "mainnet": {
     "name": "Canton Network",
-    "caip2": "canton:global-domain::mainnet",
+    "caip2": "canton:mainnet",
     "rpcUrlRequired": true
   },
   "routes": {

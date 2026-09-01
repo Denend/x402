@@ -9,7 +9,7 @@ import {
   assertAssetInstrumentConsistency,
 } from "../../src/exact/server/scheme.js";
 
-const NETWORK = "canton:global-domain::1220test" as const;
+const NETWORK = "canton:mainnet" as const;
 const DSO = "DSO::1220" + "aa".repeat(32);
 const FAC = "facilitator::1220" + "ff".repeat(32);
 

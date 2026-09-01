@@ -29,7 +29,7 @@ const CC = JSON.parse(read("mainnet-0.1.21.json")).transfer as {
 const USDCX_RAW = read("mainnet-usdcx-transfer-preapproval.b64");
 
 const FAC = "facilitator::1220" + "ff".repeat(32);
-const NETWORK = "canton:global-domain::1220test" as const;
+const NETWORK = "canton:mainnet" as const;
 
 /** now inside a fixture's ledger window: preparationTime (µs) → ms, +1s. */
 function nowFor(b64: string): number {
