@@ -161,65 +161,6 @@ export class ScanClient {
   }
 
   /**
-   * Resolve how a transfer to `receiver` would route: `direct` (receiver is
-   * preapproved → one-tx settle), `offer` (two-step Pending), or `self`.
-   *
-   * @param args - sender, receiver, amount, instrument, timing, optional registry
-   *   base for a non-Amulet token.
-   * @returns The registry's `transferKind` string (empty when unreadable).
-   */
-  async resolveTransferKind(args: {
-    sender: string;
-    receiver: string;
-    amount: string;
-    admin: string;
-    id: string;
-    requestedAt: string;
-    executeBefore: string;
-    registryBaseUrl?: string;
-  }): Promise<string> {
-    const reqBody = {
-      choiceArguments: {
-        expectedAdmin: args.admin,
-        transfer: {
-          sender: args.sender,
-          receiver: args.receiver,
-          amount: args.amount,
-          instrumentId: { admin: args.admin, id: args.id },
-          requestedAt: args.requestedAt,
-          executeBefore: args.executeBefore,
-          inputHoldingCids: [],
-          meta: { values: {} },
-        },
-        extraArgs: { context: { values: {} }, meta: { values: {} } },
-      },
-      excludeDebugFields: true,
-    };
-    if (args.registryBaseUrl) {
-      const path = `/api/token-standard/v0/registrars/${encodeURIComponent(
-        args.admin,
-      )}/registry/transfer-instruction/v1/transfer-factory`;
-      const res = await this.requestBases<{ transferKind?: string }>("POST", path, reqBody, [
-        args.registryBaseUrl,
-      ]);
-      return res.transferKind ?? "";
-    }
-    if (!this.isSv) {
-      throw new CantonError(
-        "resolveTransferKind needs the sv Scan flavor (or a registryBaseUrl for a Registry-Utility token)",
-        "UNSUPPORTED",
-      );
-    }
-    const res = await this.requestBases<{ transferKind?: string }>(
-      "POST",
-      "/registry/transfer-instruction/v1/transfer-factory",
-      reqBody,
-      [this.scanUrl, ...this.fallbackUrls],
-    );
-    return res.transferKind ?? "";
-  }
-
-  /**
    * Read a merchant's TransferPreapproval, or null when the party has none. The
    * contract is hosted on the MERCHANT's validator, so the participant ACS is not
    * readable to us — Scan is the network-wide public read that is. A payload
