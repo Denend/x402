@@ -192,6 +192,8 @@ async function main(): Promise<void> {
     });
     client.register(cantonNetwork, new ExactCantonScheme(cantonSigner));
     console.log(`Initialized Canton party: ${cantonParty} on ${cantonNetwork}`);
+  }
+
   // Register Cardano scheme if a mnemonic and Blockfrost connection are provided
   if (cardanoMnemonic) {
     if (!blockfrostBaseUrl || !blockfrostProjectId) {

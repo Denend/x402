@@ -139,6 +139,9 @@ if (cantonConfigured) {
     },
     network: CANTON_NETWORK,
     payTo: cantonAddress!,
+  });
+}
+
 const cardanoL1Confirmations = process.env.CARDANO_L1_CONFIRMATIONS?.trim();
 const cardanoExtra =
   cardanoL1Confirmations && /^-?(0|[1-9]\d?)$/.test(cardanoL1Confirmations)
@@ -249,6 +252,7 @@ if (aptosAddress) {
 }
 if (cantonConfigured) {
   server.register(CANTON_NETWORK, new ExactCantonScheme());
+}
 if (cardanoAddress) {
   server.register(CARDANO_NETWORK, new ExactCardanoScheme());
 }

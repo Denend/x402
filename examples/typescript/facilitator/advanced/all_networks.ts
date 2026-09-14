@@ -241,6 +241,9 @@ if (cantonConfigured) {
   );
   console.info(
     `Canton Facilitator party: ${cantonFacilitatorParty} on ${CANTON_NETWORK}`,
+  );
+}
+
 // Register Cardano scheme if a mnemonic and Blockfrost connection are provided
 if (cardanoMnemonic) {
   if (!blockfrostBaseUrl || !blockfrostProjectId) {

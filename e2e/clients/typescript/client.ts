@@ -314,6 +314,9 @@ export async function createE2EClient(): Promise<E2EClientContext> {
           ? { registryTrustedParties: JSON.parse(process.env.CANTON_REGISTRY_TRUSTED_PARTIES) }
           : {}),
       }),
+    });
+  }
+  if (
     process.env.CLIENT_CARDANO_MNEMONIC &&
     process.env.BLOCKFROST_PROJECT_ID &&
     process.env.CARDANO_RPC_URL
