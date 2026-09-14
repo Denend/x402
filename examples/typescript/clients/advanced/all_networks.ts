@@ -22,6 +22,8 @@ import { toClientAvmSigner } from "@x402/avm";
 import { ExactAvmScheme } from "@x402/avm/exact/client";
 import { toClientCantonSigner } from "@x402/canton";
 import { ExactCantonScheme } from "@x402/canton/exact/client";
+import { toClientCardanoSigner } from "@x402/cardano";
+import { ExactCardanoScheme } from "@x402/cardano/exact/client";
 import { ExactConcordiumScheme } from "@x402/concordium/exact/client";
 import { ExactEvmScheme } from "@x402/evm/exact/client";
 import { UptoEvmScheme } from "@x402/evm/upto/client";
@@ -55,6 +57,10 @@ config();
 
 // Configuration - optional per network
 const avmPrivateKey = process.env.AVM_PRIVATE_KEY as string | undefined;
+const cardanoMnemonic = process.env.CARDANO_MNEMONIC as string | undefined;
+const cardanoNetwork = process.env.CARDANO_NETWORK || "cardano:preprod";
+const blockfrostBaseUrl = process.env.BLOCKFROST_PREPROD_URL;
+const blockfrostProjectId = process.env.BLOCKFROST_PROJECT_ID;
 const aptosPrivateKey = process.env.APTOS_PRIVATE_KEY as string | undefined;
 // Canton: the payer's hosted participant + SV Scan + self-custody key.
 const cantonParticipantUrl = process.env.CANTON_PARTICIPANT_URL as string | undefined;
@@ -130,6 +136,7 @@ async function main(): Promise<void> {
   // Validate at least one private key is provided
   if (
     !avmPrivateKey &&
+    !cardanoMnemonic &&
     !aptosPrivateKey &&
     !(ccdPrivateKey && ccdAddress) &&
     !evmPrivateKey &&
@@ -142,7 +149,7 @@ async function main(): Promise<void> {
     !xrplSeed
   ) {
     console.error(
-      "❌ At least one of AVM_PRIVATE_KEY, APTOS_PRIVATE_KEY, CCD_PRIVATE_KEY + CCD_ADDRESS, EVM_PRIVATE_KEY, KEETA_MNEMONIC, NEAR_ACCOUNT_ID + NEAR_PRIVATE_KEY, SVM_PRIVATE_KEY, STELLAR_PRIVATE_KEY, HEDERA_ACCOUNT_ID + HEDERA_PRIVATE_KEY, TVM_PRIVATE_KEY, or XRPL_SEED is required",
+      "❌ At least one of AVM_PRIVATE_KEY, APTOS_PRIVATE_KEY, CARDANO_MNEMONIC, CCD_PRIVATE_KEY + CCD_ADDRESS, EVM_PRIVATE_KEY, KEETA_MNEMONIC, NEAR_ACCOUNT_ID + NEAR_PRIVATE_KEY, SVM_PRIVATE_KEY, STELLAR_PRIVATE_KEY, HEDERA_ACCOUNT_ID + HEDERA_PRIVATE_KEY, TVM_PRIVATE_KEY, or XRPL_SEED is required",
     );
     process.exit(1);
   }
@@ -185,6 +192,21 @@ async function main(): Promise<void> {
     });
     client.register(cantonNetwork, new ExactCantonScheme(cantonSigner));
     console.log(`Initialized Canton party: ${cantonParty} on ${cantonNetwork}`);
+  // Register Cardano scheme if a mnemonic and Blockfrost connection are provided
+  if (cardanoMnemonic) {
+    if (!blockfrostBaseUrl || !blockfrostProjectId) {
+      console.error(
+        "❌ CARDANO_MNEMONIC requires BLOCKFROST_PREPROD_URL and BLOCKFROST_PROJECT_ID",
+      );
+      process.exit(1);
+    }
+    const cardanoSigner = toClientCardanoSigner({
+      mnemonic: cardanoMnemonic,
+      network: cardanoNetwork,
+      provider: { blockfrost: { baseUrl: blockfrostBaseUrl, projectId: blockfrostProjectId } },
+    });
+    client.register("cardano:*", new ExactCardanoScheme(cardanoSigner));
+    console.log(`Initialized Cardano signer on ${cardanoNetwork}`);
   }
 
   // Register Concordium scheme if private key and address are provided

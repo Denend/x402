@@ -38,6 +38,7 @@ This page tracks which features are implemented in each SDK (TypeScript, Go, Pyt
 | canton | ✅ | ❌ | ❌ |
 | ccd (Concordium) | ✅ | ❌ | ❌ |
 | xrpl | ✅ | ❌ | ❌ |
+| cardano | ✅ | ❌ | ❌ |
 
 ## Mechanisms
 
@@ -57,10 +58,15 @@ This page tracks which features are implemented in each SDK (TypeScript, Go, Pyt
 | exact | ccd (Concordium) | sponsored V1 | ✅ | ❌ | ❌ |
 | exact | xrpl | `sequence` | ✅ | ❌ | ❌ |
 | exact | xrpl | `ticketSequence` | ✅ | ❌ | ❌ |
+| exact | cardano | `default` | ✅ | ❌ | ❌ |
+| exact | cardano | `masumi` | ✅ | ❌ | ❌ |
+| exact | cardano | `script` | ✅ | ❌ | ❌ |
 | upto | evm | `permit2` | ✅ | ✅ | ✅ |
 | upto | svm | - | ✅ | ✅ | ❌ |
 | batch-settlement | evm | `eip3009` | ✅ | ✅ | ✅ |
 | batch-settlement | evm | `permit2` | ✅ | ✅ | ✅ |
+| auth-capture | evm | `eip3009` | ✅ (client) | ✅ (client) | ❌ |
+| auth-capture | evm | `permit2` | ✅ (client) | ✅ (client) | ❌ |
 
 ## Extensions
 
@@ -148,9 +154,9 @@ This page tracks which features are implemented in each SDK (TypeScript, Go, Pyt
 
 | Hook | TypeScript | Go | Python |
 |------|------------|-----|--------|
-| onBeforeExecution | ✅ | ❌ | ❌ |
-| onAfterExecution | ✅ | ❌ | ❌ |
-| onAfterSettlement | ✅ | ❌ | ❌ |
+| onBeforeExecution | ✅ | ❌ | ✅ |
+| onAfterExecution | ✅ | ❌ | ✅ |
+| onAfterSettlement | ✅ | ❌ | ✅ |
 
 ## HTTP Server Features
 
