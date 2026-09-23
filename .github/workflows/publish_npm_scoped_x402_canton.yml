@@ -36,6 +36,10 @@ jobs:
           pnpm install --frozen-lockfile --ignore-scripts
           pnpm -r --filter=@x402/core --filter=@x402/canton run build
 
+      - name: Verify package exports
+        working-directory: ./typescript
+        run: pnpm verify:exports
+
       - name: Publish @x402/canton package
         working-directory: ./typescript/packages/mechanisms/canton
         run: |
