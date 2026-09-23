@@ -81,22 +81,52 @@ export interface FacilitatorCantonSignerConfig extends CantonLedgerConfig {
 }
 
 /**
+ * Fractional-digit count of a decimal string ("12.34" -> 2, "12" -> 0).
+ *
+ * @param dec - A decimal string.
+ * @returns The number of digits after the decimal point.
+ */
+function fractionDigits(dec: string): number {
+  const dot = dec.indexOf(".");
+  return dot === -1 ? 0 : dec.length - dot - 1;
+}
+
+/**
+ * Parse a non-negative ledger Decimal string to a BigInt scaled by 10^scale.
+ * Exact integer math — never Number() — so amounts near the precision limit are
+ * compared and summed without float rounding.
+ *
+ * @param dec - A non-negative decimal string.
+ * @param scale - Number of fractional digits to scale to (10^scale multiplier).
+ * @returns The value as a scaled BigInt.
+ */
+function toScaled(dec: string, scale: number): bigint {
+  const [intPart, fracPart = ""] = dec.split(".");
+  const frac = (fracPart + "0".repeat(scale)).slice(0, scale);
+  return BigInt((intPart || "0") + frac);
+}
+
+/**
  * Pick the smallest single holding that covers `want`, else accumulate holdings
  * largest-first until they do. Mirrors the production input-selection heuristic
- * (leaves large holdings free for sibling transfers).
+ * (leaves large holdings free for sibling transfers). All comparison and summing
+ * is exact BigInt decimal math (the package never uses Number() on ledger amounts).
  *
  * @param amounts - Map of holding contract id → ledger-Decimal amount.
  * @param want - The transfer amount as a ledger Decimal string.
  * @returns The chosen holding contract ids.
  */
-function selectInputHoldings(amounts: Map<string, string>, want: string): string[] {
-  const target = Number(want);
-  const all = [...amounts.entries()].map(([cid, amount]) => ({ cid, amount: Number(amount) }));
-  const single = all.filter(h => h.amount >= target).sort((a, b) => a.amount - b.amount)[0];
+export function selectInputHoldings(amounts: Map<string, string>, want: string): string[] {
+  const entries = [...amounts.entries()];
+  const scale = Math.max(fractionDigits(want), ...entries.map(([, a]) => fractionDigits(a)), 0);
+  const target = toScaled(want, scale);
+  const all = entries.map(([cid, amount]) => ({ cid, amount: toScaled(amount, scale) }));
+  const cmp = (a: bigint, b: bigint): number => (a < b ? -1 : a > b ? 1 : 0);
+  const single = all.filter(h => h.amount >= target).sort((a, b) => cmp(a.amount, b.amount))[0];
   if (single) return [single.cid];
   const chosen: string[] = [];
-  let acc = 0;
-  for (const h of [...all].sort((a, b) => b.amount - a.amount)) {
+  let acc = 0n;
+  for (const h of [...all].sort((a, b) => cmp(b.amount, a.amount))) {
     chosen.push(h.cid);
     acc += h.amount;
     if (acc >= target) break;
