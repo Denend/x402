@@ -1,7 +1,8 @@
 /**
  * Canton mechanism constants. No hardcoded chain ids or token addresses — a
- * Canton network is identified by its Global Synchronizer id at runtime
- * (`canton:<sync-id>`), and instruments are named per-request via
+ * Canton network is identified by its CAIP-2 tier (`canton:mainnet` |
+ * `canton:testnet` | `canton:devnet`), the Global Synchronizer id travels in
+ * `extra.synchronizerId`, and instruments are named per-request via
  * `extra.instrumentId`.
  */
 

@@ -72,34 +72,22 @@ export interface CantonInlinePayload {
 }
 
 /** Canton `exact` error codes (prefix `invalid_exact_canton_*`), mapped onto the
- *  base `VerifyResponse.invalidReason` / `SettleResponse.errorReason`. */
+ *  base `VerifyResponse.invalidReason` / `SettleResponse.errorReason`. Limited to
+ *  the codes `verify`/`settle` actually return, plus the spec's `missing_proof`. */
 export type CantonErrorCode =
   | "invalid_exact_canton_amount_mismatch"
-  | "invalid_exact_canton_asset_mismatch"
-  | "invalid_exact_canton_counter_not_ready"
   | "invalid_exact_canton_execute_before_too_far"
   | "invalid_exact_canton_execute_failed"
   | "invalid_exact_canton_expired"
   | "invalid_exact_canton_fee_payer_mismatch"
-  | "invalid_exact_canton_holding_locked"
-  | "invalid_exact_canton_input_contention"
   | "invalid_exact_canton_instrument_id_mismatch"
-  | "invalid_exact_canton_insufficient_balance"
   | "invalid_exact_canton_insufficient_inputs"
   | "invalid_exact_canton_malformed_payload"
   | "invalid_exact_canton_memo_mismatch"
   | "invalid_exact_canton_merchant_mismatch"
   | "invalid_exact_canton_merchant_not_registered"
   | "invalid_exact_canton_missing_proof"
-  | "invalid_exact_canton_nonce_reuse"
-  | "invalid_exact_canton_payment_already_settled"
   | "invalid_exact_canton_preapproval_missing"
   | "invalid_exact_canton_self_payment"
   | "invalid_exact_canton_signature_invalid"
-  | "invalid_exact_canton_transfer_command_not_found"
-  | "invalid_exact_canton_transfer_completed_not_visible"
-  | "invalid_exact_canton_transfer_factory_disabled"
-  | "invalid_exact_canton_transfer_factory_not_found"
-  | "invalid_exact_canton_transfer_instruction_not_found"
-  | "invalid_exact_canton_transfer_instruction_pending"
   | "unexpected_canton_ledger_error";
