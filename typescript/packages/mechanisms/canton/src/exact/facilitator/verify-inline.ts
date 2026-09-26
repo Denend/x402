@@ -11,13 +11,16 @@
  */
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import {
-  assertPreparedTransferMatches,
+  assertDecodedTransferMatches,
+  assertSynchronizerMatches,
   PreparedTransferMismatchError,
   decodePrepared,
   extractTransfer,
+  type DecodedPrepared,
 } from "../../prepared-transfer.js";
 import { decodeInlinePaymentPayload, InlinePayloadError } from "../../inline-payload.js";
 import { wireAmountToLedgerDecimal } from "../../amount.js";
+import { CANTON_TRANSFER_METHOD } from "../../constants.js";
 import type { CantonErrorCode } from "../../types.js";
 import type { FacilitatorCantonSigner, CantonSchemeConfig } from "../../signer.js";
 
@@ -102,7 +105,7 @@ export async function verifyInlineTransfer(
   payload: PaymentPayload,
   requirements: PaymentRequirements,
   signer: FacilitatorCantonSigner,
-  config: CantonSchemeConfig = {},
+  config: CantonSchemeConfig & { synchronizerId?: string } = {},
   nowMsOverride?: number,
 ): Promise<InlineVerifyResult> {
   const facilitatorParties = new Set(signer.getAddresses());
@@ -116,19 +119,19 @@ export async function verifyInlineTransfer(
     return fail("invalid_exact_canton_malformed_payload");
   }
 
-  const preparedB64 = decoded.preparedTransactionBytes.toString("base64");
-
-  // Rule 8 — the proven payer, read from the SIGNED metadata (single act_as).
-  let payer: string;
+  // Decoded ONCE; every check below reads this same parse.
+  let pt: DecodedPrepared;
   try {
-    const pt = decodePrepared(preparedB64);
-    if (pt.actAs.length !== 1 || !pt.actAs[0]) {
-      return fail("invalid_exact_canton_malformed_payload");
-    }
-    payer = pt.actAs[0];
+    pt = decodePrepared(decoded.preparedTransactionBytes.toString("base64"));
   } catch {
     return fail("invalid_exact_canton_malformed_payload");
   }
+
+  // Rule 8 — the proven payer, read from the SIGNED metadata (single act_as).
+  if (pt.actAs.length !== 1 || !pt.actAs[0]) {
+    return fail("invalid_exact_canton_malformed_payload");
+  }
+  const payer = pt.actAs[0];
 
   // Rule 11 — self-payment guard.
   if (facilitatorParties.has(payer)) {
@@ -140,12 +143,24 @@ export async function verifyInlineTransfer(
     synchronizerId?: string;
     feePayer?: string;
     memo?: string;
+    assetTransferMethod?: string;
   };
 
   // Rule 9 — fee payer must be THIS facilitator (absent is a mismatch).
   if (typeof extra.feePayer !== "string" || !facilitatorParties.has(extra.feePayer)) {
     return fail("invalid_exact_canton_fee_payer_mismatch", payer);
   }
+
+  // The scheme settles through the transfer factory only.
+  if (extra.assetTransferMethod !== CANTON_TRANSFER_METHOD) {
+    return fail("invalid_exact_canton_malformed_payload", payer);
+  }
+
+  // Synchronizer pin: this facilitator's own configured domain is authoritative;
+  // the requirement's `extra.synchronizerId` is the fallback, and when both are
+  // set the signed transaction must match both.
+  const ownSynchronizer = config.synchronizerId || undefined;
+  const expectedSynchronizer = ownSynchronizer ?? extra.synchronizerId;
 
   // Rule 6 — the instrument must be pinned, both halves.
   if (
@@ -170,7 +185,7 @@ export async function verifyInlineTransfer(
   let declaredExecuteBefore: number | undefined;
   let registryDirectDelivery = false;
   try {
-    assertPreparedTransferMatches(preparedB64, {
+    assertDecodedTransferMatches(pt, {
       sender: payer,
       receiver: requirements.payTo,
       amount: expectedAmount,
@@ -184,11 +199,13 @@ export async function verifyInlineTransfer(
             ),
           }
         : {}),
-      ...(extra.synchronizerId !== undefined ? { synchronizerId: extra.synchronizerId } : {}),
+      ...(expectedSynchronizer !== undefined ? { synchronizerId: expectedSynchronizer } : {}),
       ...(typeof extra.memo === "string" && extra.memo.length > 0 ? { memo: extra.memo } : {}),
       ...(nowMsOverride !== undefined ? { nowMs: nowMsOverride } : {}),
     });
-    const pt = decodePrepared(preparedB64);
+    if (ownSynchronizer !== undefined && extra.synchronizerId !== undefined) {
+      assertSynchronizerMatches(pt.synchronizerId, extra.synchronizerId);
+    }
     const ex = pt.exercises.find(e => /TransferFactory_Transfer/.test(e.choiceId));
     const t = ex?.chosenValue ? extractTransfer(ex.chosenValue) : undefined;
     declaredInputs = t?.inputHoldingCids ?? [];

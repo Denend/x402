@@ -1641,7 +1641,7 @@ const PHYSICAL_SYNCHRONIZER_SUFFIX = /^[0-9]+-[0-9]+$/;
  * @param synchronizerId
  * @param expected
  */
-function assertSynchronizerMatches(
+export function assertSynchronizerMatches(
   synchronizerId: string | undefined,
   expected: string | undefined,
 ): void {
@@ -2757,8 +2757,21 @@ export function assertPreparedTransferMatches(
   preparedTransactionB64: string,
   expect: PreparedTransferExpectation,
 ): void {
-  const decoded = decodePrepared(preparedTransactionB64);
+  assertDecodedTransferMatches(decodePrepared(preparedTransactionB64), expect);
+}
 
+/**
+ * {@link assertPreparedTransferMatches} over an already-decoded prepared
+ * transaction, so a caller that decoded it once (the facilitator verify path)
+ * does not parse the same bytes again.
+ *
+ * @param decoded
+ * @param expect
+ */
+export function assertDecodedTransferMatches(
+  decoded: DecodedPrepared,
+  expect: PreparedTransferExpectation,
+): void {
   // Node-traversal invariant (shared with the v1 arm): exactly one allowed ROOT
   // exercise & no other root; EVERY node recognized (no node hidden under an
   // unknown version/type); EXACTLY ONE root that IS the single allowed

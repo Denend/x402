@@ -252,3 +252,64 @@ describe("verifyInlineTransfer — USDCx (CIP-56 registry)", () => {
     expect(r.ok).toBe(false);
   });
 });
+
+describe("verifyInlineTransfer — requirements gates", () => {
+  const SIGNED_SYNC = decodePrepared(CC_RAW).synchronizerId!;
+  const OTHER_SYNC = "global-domain::1220" + "00".repeat(32);
+
+  async function run(
+    reqs: PaymentRequirements,
+    config: { synchronizerId?: string } = {},
+  ): Promise<Awaited<ReturnType<typeof verifyInlineTransfer>>> {
+    const now = nowFor(CC_RAW);
+    return verifyInlineTransfer(
+      inlinePayload(CC_RAW),
+      reqs,
+      stubSigner({ fetchPreapproval: async () => livePreapproval(now) }),
+      config,
+      now,
+    );
+  }
+
+  it("fails an assetTransferMethod other than transfer-factory", async () => {
+    const reqs = ccReqs();
+    const r = await run({ ...reqs, extra: { ...reqs.extra, assetTransferMethod: "allocation" } });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("invalid_exact_canton_malformed_payload");
+  });
+
+  it("fails a missing assetTransferMethod", async () => {
+    const reqs = ccReqs();
+    const extra = { ...(reqs.extra as Record<string, unknown>) };
+    delete extra.assetTransferMethod;
+    const r = await run({ ...reqs, extra });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("invalid_exact_canton_malformed_payload");
+  });
+
+  it("pins to the facilitator's own synchronizer when extra omits it", async () => {
+    expect((await run(ccReqs(), { synchronizerId: SIGNED_SYNC })).ok).toBe(true);
+    const r = await run(ccReqs(), { synchronizerId: OTHER_SYNC });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("invalid_exact_canton_malformed_payload");
+  });
+
+  it("fails when extra.synchronizerId differs from the signed domain", async () => {
+    const reqs = ccReqs();
+    const r = await run(
+      { ...reqs, extra: { ...reqs.extra, synchronizerId: OTHER_SYNC } },
+      { synchronizerId: SIGNED_SYNC },
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("invalid_exact_canton_malformed_payload");
+  });
+
+  it("passes when facilitator and extra both name the signed domain", async () => {
+    const reqs = ccReqs();
+    const r = await run(
+      { ...reqs, extra: { ...reqs.extra, synchronizerId: SIGNED_SYNC } },
+      { synchronizerId: SIGNED_SYNC },
+    );
+    expect(r.ok).toBe(true);
+  });
+});
