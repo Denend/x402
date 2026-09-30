@@ -90,4 +90,7 @@ export type CantonErrorCode =
   | "invalid_exact_canton_preapproval_missing"
   | "invalid_exact_canton_self_payment"
   | "invalid_exact_canton_signature_invalid"
-  | "unexpected_canton_ledger_error";
+  | "unexpected_canton_ledger_error"
+  // Generic x402 codes (specs/x402-specification-v2.md).
+  | "invalid_network"
+  | "unsupported_scheme";

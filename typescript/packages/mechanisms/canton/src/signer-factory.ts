@@ -40,10 +40,15 @@ export interface CantonLedgerConfig {
   synchronizerId: string;
   /** SV Scan base URL (registry resolves, preapproval, holdings). */
   scanUrl: string;
-  /** Scan flavor; `sv` unlocks the registry resolves. Defaults to `sv`. */
+  /** Scan flavor; `sv` unlocks the registry resolves. Defaults to `sv`. The
+   *  facilitator signer requires `sv`. */
   scanFlavor?: ScanFlavor;
   /** Additional SV Scan bases to fail over to. */
   scanFallbackUrls?: string[];
+  /** Bearer for the Scan hosts, when a gated Scan requires one. Separate from
+   *  `token` on purpose: the ledger token is never sent to Scan. Public SV Scans
+   *  need none — leave unset. */
+  scanToken?: string | TokenProvider;
   /** Non-Amulet CIP-56 registries: instrument admin party → DA Registry Utility
    *  base URL. */
   tokenRegistries?: Record<string, string>;
@@ -151,7 +156,7 @@ export function toClientCantonSigner(config: ClientCantonSignerConfig): ClientCa
   });
   const scan = new ScanClient({
     scanUrl: config.scanUrl,
-    token: config.token,
+    ...(config.scanToken !== undefined ? { token: config.scanToken } : {}),
     flavor: config.scanFlavor ?? "sv",
     ...(config.scanFallbackUrls ? { fallbackUrls: config.scanFallbackUrls } : {}),
     ...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
@@ -245,6 +250,15 @@ export function toClientCantonSigner(config: ClientCantonSignerConfig): ClientCa
 export function toFacilitatorCantonSigner(
   config: FacilitatorCantonSignerConfig,
 ): FacilitatorCantonSigner {
+  // Verify pins every Canton Coin transfer to the factory resolved on the SV
+  // Scan registry root, which the validator flavor does not serve. Refuse at
+  // construction instead of failing every payment.
+  if ((config.scanFlavor ?? "sv") !== "sv") {
+    throw new Error(
+      `toFacilitatorCantonSigner requires scanFlavor "sv" (got "${config.scanFlavor}"): ` +
+        `the facilitator resolves the Canton Coin transfer factory on SV Scan`,
+    );
+  }
   const client = new CantonClient({
     participantUrl: config.participantUrl,
     token: config.token,
@@ -253,17 +267,26 @@ export function toFacilitatorCantonSigner(
   });
   const scan = new ScanClient({
     scanUrl: config.scanUrl,
-    token: config.token,
+    ...(config.scanToken !== undefined ? { token: config.scanToken } : {}),
     flavor: config.scanFlavor ?? "sv",
     ...(config.scanFallbackUrls ? { fallbackUrls: config.scanFallbackUrls } : {}),
     ...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
     ...(config.fetch ? { fetch: config.fetch } : {}),
   });
-  const tfSvc = new TransferFactoryService({
-    client,
-    userId: config.userId,
-    ...(config.tokenRegistries ? { tokenRegistries: config.tokenRegistries } : {}),
-  });
+  const tfSvc = new TransferFactoryService({ client, userId: config.userId });
+  const registryBaseUrl = (admin: string): string | undefined =>
+    Object.prototype.hasOwnProperty.call(config.tokenRegistries ?? {}, admin)
+      ? config.tokenRegistries![admin]
+      : undefined;
+  // Resolved factory ids per instrument. The factory is a long-lived contract
+  // (Amulet: the ExternalPartyAmuletRules), so a short TTL plus an explicit
+  // refresh on mismatch keeps it current without a Scan call per payment; the
+  // refresh is throttled so a stream of mismatching payloads cannot turn into a
+  // stream of Scan calls.
+  const factoryCache = new Map<string, { id: string; at: number }>();
+  const FACTORY_TTL_MS = 5 * 60_000;
+  const FACTORY_MIN_REFRESH_MS = 5_000;
+  const FACTORY_CACHE_MAX = 256;
   // Default key source: the participant JSON Ledger API JOSE route. A deployment
   // whose participant does not serve it (e.g. Splice) injects `fetchPayerSigningKey`.
   const keyLookup =
@@ -296,6 +319,36 @@ export function toFacilitatorCantonSigner(
           ? { publishedProtocolKeys: result.publishedProtocolKeys }
           : {}),
       };
+    },
+
+    registryBaseUrl,
+
+    async resolveTransferFactoryId(args) {
+      const { admin, id } = args.instrumentId;
+      // Party ids contain `::` themselves, so join unambiguously.
+      const key = JSON.stringify([admin, id]);
+      const now = Date.now();
+      const hit = factoryCache.get(key);
+      if (hit) {
+        const age = now - hit.at;
+        if (args.refresh ? age < FACTORY_MIN_REFRESH_MS : age < FACTORY_TTL_MS) return hit.id;
+      }
+      const base = registryBaseUrl(admin);
+      const factory = await scan.resolveTransferFactory({
+        sender: args.sender,
+        receiver: args.receiver,
+        amount: args.amount,
+        admin,
+        id,
+        inputHoldingCids: args.inputHoldingCids,
+        ...(base ? { registryBaseUrl: base } : {}),
+      });
+      if (typeof factory.factoryId !== "string" || factory.factoryId.length === 0) {
+        throw new Error("transfer-factory resolve returned no factoryId");
+      }
+      if (!factoryCache.has(key) && factoryCache.size >= FACTORY_CACHE_MAX) factoryCache.clear();
+      factoryCache.set(key, { id: factory.factoryId, at: now });
+      return factory.factoryId;
     },
 
     async fetchPreapproval(party): Promise<PreapprovalView | null> {
@@ -349,7 +402,7 @@ export function toFacilitatorCantonSigner(
         },
         submissionId: `x402-inline-${randomUUID()}`,
         // Selects the registry vs Amulet funds-moved signal in confirmTransferred.
-        ...(args.instrumentAdmin !== undefined ? { instrumentAdmin: args.instrumentAdmin } : {}),
+        transferKind: args.transferKind,
       });
       return {
         updateId: result.updateId,

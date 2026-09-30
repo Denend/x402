@@ -337,6 +337,7 @@ export async function createE2EClient(): Promise<E2EClientContext> {
       userId: process.env.CANTON_USER_ID,
       synchronizerId: process.env.CANTON_SYNCHRONIZER_ID,
       scanUrl: process.env.CANTON_SCAN_URL,
+      ...(process.env.CANTON_SCAN_TOKEN ? { scanToken: process.env.CANTON_SCAN_TOKEN } : {}),
       party: process.env.CLIENT_CANTON_PARTY,
       privateKeyPem: process.env.CLIENT_CANTON_PRIVATE_KEY,
       ...(process.env.CANTON_TOKEN_REGISTRIES

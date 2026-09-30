@@ -30,7 +30,8 @@ const facilitatorCantonSigner = toFacilitatorCantonSigner({
   token: process.env.CANTON_TOKEN!,          // static bearer or a resolver
   userId: process.env.CANTON_USER_ID!,
   synchronizerId: process.env.CANTON_SYNCHRONIZER_ID!,
-  scanUrl: process.env.CANTON_SCAN_URL!,
+  scanUrl: process.env.CANTON_SCAN_URL!,      // public SV Scan: no token needed
+  // scanToken: "…",                         // only for a gated Scan; the ledger token is never sent to Scan
   facilitatorParties: [process.env.CANTON_FACILITATOR_PARTY!],
 });
 ```
@@ -59,7 +60,7 @@ import { registerExactCantonScheme } from "@x402/canton/exact/facilitator";
 registerExactCantonScheme(facilitator, {
   signer: facilitatorCantonSigner,
   synchronizerId: "global-domain::1220…",
-  networks: "canton:mainnet",
+  networks: "canton:mainnet",   // required: the exact network(s) served
 });
 ```
 
@@ -93,7 +94,8 @@ A non-Amulet token names its registrar as `instrumentId.admin`. Its
 `TransferFactory_Transfer` also names the DA Registry Utility operator (and, for
 a bridged token, the bridge operator) as signatories/observers; pass those
 out-of-band-trusted infra parties via `CantonSchemeConfig.registryTrustedParties`
-(and the registrar's utility base URL via `tokenRegistries`). Registry support
+(and the registrar's utility base URL via the signer's `tokenRegistries`, the
+single source for both verify and settle). Registry support
 is a superset of Canton Coin and is gated on the corresponding spec amendment.
 
 ## Testing

@@ -26,12 +26,11 @@
  * CONCATENATED members transparently and silently discards trailing bytes —
  * exactly the two shapes the scheme tells us to reject, and it would accept
  * both without a word. So we parse the 10-byte header ourselves, inflate only
- * the raw deflate body, and verify the member's own CRC32/ISIZE trailer. Any
- * appended byte or differing second member lands inside the range we inflate,
- * which makes the trailer disagree — rejected by construction. The one case a
- * trailer cannot catch is a member concatenated with an identical copy of
- * itself (its trailer agrees by definition); that one is caught by scanning
- * for the seam, see below.
+ * the raw deflate body, and verify the member's own CRC32/ISIZE trailer. Raw
+ * inflate stops at the final deflate block and ignores what follows, so we
+ * also require it to have consumed the whole body: any byte between the end of
+ * the deflate stream and the trailer (a second member, or junk) is rejected by
+ * construction, whether or not the trailer happens to agree.
  *
  * There is exactly ONE decompression here, under exactly one bound. An earlier
  * draft cross-checked the result against a second, full gunzip decode; mutation
@@ -43,7 +42,7 @@
  * ISIZE is verified, never trusted: it is compared against what we actually
  * produced, and is never used to size an allocation.
  * ════════════════════════════════════════════════════════════════════════ */
-import { crc32, inflateRawSync, gzipSync } from "node:zlib";
+import { crc32, inflateRawSync, gzipSync, type ZlibOptions } from "node:zlib";
 
 /** Thrown for any malformed / out-of-bounds inline payload. Callers map this to
  *  the scheme's `invalid_exact_canton_malformed_payload`. Deliberately one
@@ -142,11 +141,18 @@ export function decodeInlinePayload(input: Uint8Array, opts: InlineDecodeOptions
   const trailer = buf.subarray(buf.length - GZIP_TRAILER_BYTES);
 
   let out: Buffer;
+  let consumed: number;
   try {
     // maxOutputLength makes the inflater stop AT the bound and throw, instead
     // of growing to fit — this is the decompression-bomb defence. The declared
-    // ISIZE is not consulted here at all.
-    out = inflateRawSync(body, { maxOutputLength: maxDecompressed });
+    // ISIZE is not consulted here at all. `info: true` also reports how many
+    // input bytes the inflater consumed, checked against the body below.
+    const res = inflateRawSync(body, {
+      maxOutputLength: maxDecompressed,
+      info: true,
+    } as ZlibOptions) as unknown as { buffer: Buffer; engine: { bytesWritten: number } };
+    out = res.buffer;
+    consumed = res.engine.bytesWritten;
   } catch (err) {
     // Classify on the error CODE, not its message: hitting maxOutputLength
     // raises ERR_BUFFER_TOO_LARGE with the text "Cannot create a Buffer larger
@@ -159,9 +165,15 @@ export function decodeInlinePayload(input: Uint8Array, opts: InlineDecodeOptions
     );
   }
 
-  // Verify the member's own trailer against what we actually produced. This is
-  // what makes concatenated members and trailing bytes fail: their extra bytes
-  // were inflated as part of the body, so the CRC and length cannot agree.
+  // The deflate stream must end exactly where the trailer begins. raw inflate
+  // stops at the final deflate block and silently ignores anything after it,
+  // so without this a second gzip member, or arbitrary junk, could sit between
+  // the stream end and the trailer and still decode to the original bytes.
+  if (consumed !== body.length) {
+    throw new InlineCodecError("bytes after the deflate stream (not a single gzip member)");
+  }
+
+  // Verify the member's own trailer against what we actually produced.
   const expectedCrc = trailer.readUInt32LE(0);
   const expectedSize = trailer.readUInt32LE(4);
   if (out.length !== expectedSize) {
@@ -169,25 +181,6 @@ export function decodeInlinePayload(input: Uint8Array, opts: InlineDecodeOptions
   }
   if (crc32(out) >>> 0 !== expectedCrc) {
     throw new InlineCodecError("gzip trailer checksum does not match the output");
-  }
-
-  // The trailer check above catches concatenation only when the members
-  // DIFFER; two copies of the same member produce a trailer that agrees with
-  // the first member's output and would otherwise slip through.
-  //
-  // Deliberately NOT done by decoding again with gunzip (which reads every
-  // member) and comparing lengths: that would decompress the payload a second
-  // time, and its own cap would then mask a missing cap on the inflate above —
-  // a bomb would still be refused, but only after being fully allocated. One
-  // decompression, one bound. So the second member is found structurally
-  // instead: its magic is preceded by the first member's own trailer.
-  const seam = Buffer.alloc(10);
-  seam.writeUInt32LE(expectedCrc, 0);
-  seam.writeUInt32LE(expectedSize, 4);
-  seam[8] = 0x1f;
-  seam[9] = 0x8b;
-  if (body.includes(seam)) {
-    throw new InlineCodecError("input carries more than one gzip member");
   }
   return out;
 }

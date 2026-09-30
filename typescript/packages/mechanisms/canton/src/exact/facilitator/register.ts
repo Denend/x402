@@ -1,15 +1,15 @@
 import { x402Facilitator } from "@x402/core/facilitator";
 import { Network } from "@x402/core/types";
 import { FacilitatorCantonSigner, CantonSchemeConfig } from "../../signer.js";
-import { CANTON_CAIP_FAMILY } from "../../constants.js";
 import { ExactCantonScheme, CantonFacilitatorOptions } from "./scheme.js";
 
 /** Configuration for registering the Canton facilitator scheme. */
 export interface CantonFacilitatorConfig extends CantonSchemeConfig {
   /** Ledger access + facilitator key(s). */
   signer: FacilitatorCantonSigner;
-  /** Canton networks to register (default: the `canton:*` family). */
-  networks?: Network | Network[];
+  /** The exact Canton networks to register (e.g. `canton:mainnet`). Required:
+   *  a `canton:*` wildcard would be advertised verbatim in `/supported`. */
+  networks: Network | Network[];
   /** Global Synchronizer id advertised in the 402 `extra`. */
   synchronizerId?: string;
 }
@@ -26,7 +26,11 @@ export function registerExactCantonScheme(
   config: CantonFacilitatorConfig,
 ): x402Facilitator {
   const { signer, networks, ...options } = config;
-  const scheme = new ExactCantonScheme(signer, options as CantonFacilitatorOptions);
-  facilitator.register(networks ?? (CANTON_CAIP_FAMILY as Network), scheme);
+  const list = Array.isArray(networks) ? networks : [networks];
+  const scheme = new ExactCantonScheme(signer, {
+    ...(options as CantonFacilitatorOptions),
+    networks: list,
+  });
+  facilitator.register(list, scheme);
   return facilitator;
 }

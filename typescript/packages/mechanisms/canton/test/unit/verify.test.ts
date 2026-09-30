@@ -31,6 +31,14 @@ const USDCX_RAW = read("mainnet-usdcx-transfer-preapproval.b64");
 const FAC = "facilitator::1220" + "ff".repeat(32);
 const NETWORK = "canton:mainnet" as const;
 
+/** The contract id the fixture's single root exercise targets (its factory). */
+function rootCid(b64: string): string {
+  const d = decodePrepared(b64);
+  return d.nodes.find(n => n.nodeId === d.roots[0])!.exercise!.contractId!;
+}
+const CC_FACTORY = rootCid(CC_RAW);
+const USDCX_FACTORY = rootCid(USDCX_RAW);
+
 /** now inside a fixture's ledger window: preparationTime (µs) → ms, +1s. */
 function nowFor(b64: string): number {
   const prep = decodePrepared(b64).preparationTime ?? 0n;
@@ -40,7 +48,7 @@ function nowFor(b64: string): number {
 function inlinePayload(rawB64: string): PaymentPayload {
   return {
     x402Version: 2,
-    accepted: {} as never,
+    accepted: { scheme: "exact", network: NETWORK } as never,
     payload: {
       ...encodeInlinePaymentPayload({
         preparedTransactionBytes: Buffer.from(rawB64, "base64"),
@@ -56,6 +64,9 @@ function stubSigner(over: Partial<FacilitatorCantonSigner> = {}): FacilitatorCan
     getAddresses: () => [FAC],
     verifySignature: async () => ({ verified: true, preparedTxHashHex: "cd".repeat(32) }),
     fetchPreapproval: async () => null,
+    registryBaseUrl: () => undefined,
+    resolveTransferFactoryId: async ({ instrumentId }) =>
+      instrumentId.id === "Amulet" ? CC_FACTORY : USDCX_FACTORY,
     executeSubmission: async () => ({ updateId: "1220-x", transferred: true }),
     ...over,
   };
@@ -97,6 +108,7 @@ describe("verifyInlineTransfer — Canton Coin", () => {
     );
     expect(r.ok).toBe(true);
     expect(r.payer).toBe(CC.sender);
+    expect(r.transferKind).toBe("amulet");
   });
 
   it("fails a tampered amount", async () => {
@@ -226,11 +238,40 @@ describe("verifyInlineTransfer — USDCx (CIP-56 registry)", () => {
   });
 
   const config = {
-    tokenRegistries: { [USDCX_ADMIN]: "https://api.utilities.digitalasset.com" },
     registryTrustedParties: { [USDCX_ADMIN]: [OPERATOR, BRIDGE] },
   };
+  // The registry map lives on the signer only (single source).
+  const registrySigner = (over: Partial<FacilitatorCantonSigner> = {}) =>
+    stubSigner({
+      registryBaseUrl: admin =>
+        admin === USDCX_ADMIN ? "https://api.utilities.digitalasset.com" : undefined,
+      ...over,
+    });
 
   it("passes with the registrar configured and operator+bridge trusted", async () => {
+    const r = await verifyInlineTransfer(
+      inlinePayload(USDCX_RAW),
+      usdcxReqs(),
+      registrySigner(),
+      config,
+      NOW_MS,
+    );
+    expect(r.ok).toBe(true);
+    expect(r.transferKind).toBe("registry");
+  });
+
+  it("fails when the registry infra parties are NOT trusted (foreign-party backstop)", async () => {
+    const r = await verifyInlineTransfer(
+      inlinePayload(USDCX_RAW),
+      usdcxReqs(),
+      registrySigner(),
+      {},
+      NOW_MS,
+    );
+    expect(r.ok).toBe(false);
+  });
+
+  it("takes the preapproval path when the signer does not know the registrar", async () => {
     const r = await verifyInlineTransfer(
       inlinePayload(USDCX_RAW),
       usdcxReqs(),
@@ -238,18 +279,8 @@ describe("verifyInlineTransfer — USDCx (CIP-56 registry)", () => {
       config,
       NOW_MS,
     );
-    expect(r.ok).toBe(true);
-  });
-
-  it("fails when the registry infra parties are NOT trusted (foreign-party backstop)", async () => {
-    const r = await verifyInlineTransfer(
-      inlinePayload(USDCX_RAW),
-      usdcxReqs(),
-      stubSigner(),
-      { tokenRegistries: config.tokenRegistries },
-      NOW_MS,
-    );
     expect(r.ok).toBe(false);
+    expect(r.reason).toBe("invalid_exact_canton_preapproval_missing");
   });
 });
 
@@ -311,5 +342,112 @@ describe("verifyInlineTransfer — requirements gates", () => {
       { synchronizerId: SIGNED_SYNC },
     );
     expect(r.ok).toBe(true);
+  });
+});
+
+describe("verifyInlineTransfer — transfer factory pin", () => {
+  const OTHER_FACTORY = "00" + "ab".repeat(33);
+
+  async function run(signer: FacilitatorCantonSigner) {
+    const now = nowFor(CC_RAW);
+    return verifyInlineTransfer(inlinePayload(CC_RAW), ccReqs(), signer, {}, now);
+  }
+  const withPreapproval = (over: Partial<FacilitatorCantonSigner>) => {
+    const now = nowFor(CC_RAW);
+    return stubSigner({ fetchPreapproval: async () => livePreapproval(now), ...over });
+  };
+
+  it("rejects a root exercise on a contract other than the resolved factory", async () => {
+    const calls: Array<boolean | undefined> = [];
+    const r = await run(
+      withPreapproval({
+        resolveTransferFactoryId: async args => {
+          calls.push(args.refresh);
+          return OTHER_FACTORY;
+        },
+      }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("invalid_exact_canton_malformed_payload");
+    expect(calls).toEqual([undefined, true]); // one refresh, then refuse
+  });
+
+  it("accepts after one refresh when the cached factory was stale", async () => {
+    const r = await run(
+      withPreapproval({
+        resolveTransferFactoryId: async args => (args.refresh ? CC_FACTORY : OTHER_FACTORY),
+      }),
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  it("resolves with the transfer's own parties, amount, instrument and inputs", async () => {
+    let seen: Parameters<FacilitatorCantonSigner["resolveTransferFactoryId"]>[0] | undefined;
+    await run(
+      withPreapproval({
+        resolveTransferFactoryId: async args => {
+          seen = args;
+          return CC_FACTORY;
+        },
+      }),
+    );
+    expect(seen?.sender).toBe(CC.sender);
+    expect(seen?.receiver).toBe(CC.receiver);
+    expect(seen?.instrumentId).toEqual(CC.instrumentId);
+    expect(seen?.inputHoldingCids.length).toBeGreaterThan(0);
+  });
+
+  it("fails closed when the factory cannot be resolved", async () => {
+    const r = await run(
+      withPreapproval({
+        resolveTransferFactoryId: async () => {
+          throw new Error("scan down");
+        },
+      }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("unexpected_canton_ledger_error");
+  });
+});
+
+describe("verifyInlineTransfer — scheme and network", () => {
+  async function run(
+    payload: PaymentPayload,
+    reqs: PaymentRequirements,
+    config: { networks?: readonly string[] } = {},
+  ) {
+    const now = nowFor(CC_RAW);
+    return verifyInlineTransfer(
+      payload,
+      reqs,
+      stubSigner({ fetchPreapproval: async () => livePreapproval(now) }),
+      config,
+      now,
+    );
+  }
+
+  it("rejects when the accepted network differs from the requirements", async () => {
+    const p = { ...inlinePayload(CC_RAW), accepted: { scheme: "exact", network: "canton:devnet" } };
+    const r = await run(p as never, ccReqs());
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("invalid_network");
+  });
+
+  it("rejects a network this facilitator does not serve", async () => {
+    const r = await run(inlinePayload(CC_RAW), ccReqs(), { networks: ["canton:devnet"] });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("invalid_network");
+  });
+
+  it("passes on a served network", async () => {
+    const r = await run(inlinePayload(CC_RAW), ccReqs(), { networks: [NETWORK] });
+    expect(r.ok).toBe(true);
+  });
+
+  it("rejects a non-exact scheme", async () => {
+    const p = { ...inlinePayload(CC_RAW), accepted: { scheme: "upto", network: NETWORK } };
+    const r = await run(p as never, ccReqs());
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("unsupported_scheme");
   });
 });

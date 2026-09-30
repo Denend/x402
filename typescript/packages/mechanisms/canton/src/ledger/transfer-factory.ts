@@ -10,7 +10,10 @@
 import type { CantonClient } from "./client.js";
 
 const AMULET_SUFFIX_RE = /:Splice\.Amulet:Amulet$/;
-const TRANSFER_INSTRUCTION_SUFFIX_RE = /:TransferInstruction$/;
+/** A pending two-step transfer: the token standard's instruction under any
+ *  implementation name (`Splice.AmuletTransferInstruction:AmuletTransferInstruction`,
+ *  a registry's `...:TransferInstruction`) or a legacy wallet `TransferOffer`. */
+const PENDING_TRANSFER_SUFFIX_RE = /:(?:\w*TransferInstruction|TransferOffer)$/;
 
 /**
  * Positive proof a registry transfer delivered, read from the token standard's
@@ -39,6 +42,24 @@ export function transferCompletedFromResult(
   return undefined;
 }
 
+/** HTTP statuses on which /execute provably did not accept the submission.
+ *  Deliberately an allow-list: 408 (timeout), 409 (duplicate — the first may be
+ *  committing), 499 (cancelled) and any unlisted status stay unknown. */
+const DEFINITE_EXECUTE_REFUSALS = new Set([400, 401, 403, 404, 413, 422, 429]);
+
+/**
+ * True when an /execute failure is a definite refusal (an allow-listed HTTP
+ * status). Everything else, including every non-HTTP failure, is unknown.
+ *
+ * @param err - The error thrown by interactiveSubmissionExecute.
+ * @returns True when the request was provably not accepted.
+ */
+export function isDefiniteExecuteRefusal(err: unknown): boolean {
+  const e = err as { code?: unknown; status?: unknown } | null;
+  if (e?.code !== "HTTP_ERROR" || typeof e.status !== "number") return false;
+  return DEFINITE_EXECUTE_REFUSALS.has(e.status);
+}
+
 /** Dependencies for {@link TransferFactoryService}. */
 export interface TransferFactoryDeps {
   client: Pick<
@@ -52,12 +73,11 @@ export interface TransferFactoryDeps {
   userId: string;
   /** getTransactionById confirmation retry (the payer projection can lag). */
   confirmRetry?: { attempts: number; delayMs: number };
-  /** Non-Amulet CIP-56 registries: instrument admin party → DA Registry Utility
-   *  base URL. When an instrument's admin is present, the funds-moved gate uses
-   *  the CIP-56 generic signal (committed + not pending) instead of an archived
-   *  Amulet. */
-  tokenRegistries?: Record<string, string>;
 }
+
+/** Which funds-moved signal applies: Canton Coin (archived Amulet) or a CIP-56
+ *  registry token (the standard's Completed result tag). */
+export type TransferKind = "amulet" | "registry";
 
 /** Result of {@link TransferFactoryService.execute}. */
 export interface TfExecuteResult {
@@ -106,7 +126,7 @@ export class TransferFactoryService {
    * committed-but-did-not-move-funds outcome returns `transferred:false`.
    *
    * @param input - The payer, prepared transaction, signature envelope, scheme
-   *   version, submission id, optional begin offset, and instrument admin.
+   *   version, submission id, optional begin offset, and transfer kind.
    * @returns The updateId and funds-moved verdict.
    */
   async execute(input: {
@@ -118,16 +138,25 @@ export class TransferFactoryService {
     };
     submissionId: string;
     beginExclusive?: number;
-    instrumentAdmin?: string;
+    transferKind: TransferKind;
   }): Promise<TfExecuteResult> {
     const offset0 = input.beginExclusive ?? (await this.deps.client.getLedgerEnd()).offset;
-    const r = await this.deps.client.interactiveSubmissionExecute({
-      preparedTransaction: input.preparedTransaction,
-      hashingSchemeVersion: input.hashingSchemeVersion,
-      partySignatures: input.partySignatures,
-      submissionId: input.submissionId,
-      deduplicationPeriod: { Empty: {} },
-    });
+    let r: Awaited<ReturnType<TransferFactoryDeps["client"]["interactiveSubmissionExecute"]>>;
+    try {
+      r = await this.deps.client.interactiveSubmissionExecute({
+        preparedTransaction: input.preparedTransaction,
+        hashingSchemeVersion: input.hashingSchemeVersion,
+        partySignatures: input.partySignatures,
+        submissionId: input.submissionId,
+        deduplicationPeriod: { Empty: {} },
+      });
+    } catch (err) {
+      // Only a definite refusal of the request means nothing was submitted. A
+      // timeout, a dropped connection, an unreadable body or a 5xx may have
+      // reached the ledger — that outcome is unknown, never a rejection.
+      if (isDefiniteExecuteRefusal(err)) throw err;
+      throw new SubmissionOutcomeUnknownError(err);
+    }
     // /execute is async: it normally answers `{}` with the updateId on the
     // completion stream. Everything below reads the outcome of a submission
     // already in flight — it can classify a payment, never unmake it.
@@ -147,7 +176,7 @@ export class TransferFactoryService {
         throw new SubmissionOutcomeUnknownError(err);
       }
     }
-    return this.confirmTransferred(input.payer, updateId, input.instrumentAdmin);
+    return this.confirmTransferred(input.payer, updateId, input.transferKind);
   }
 
   /**
@@ -157,15 +186,15 @@ export class TransferFactoryService {
    *
    * @param payer - The payer party whose projection to read.
    * @param updateId - The committed update to confirm.
-   * @param instrumentAdmin - The transfer's instrument admin (selects the
-   *   Amulet vs registry-utility funds-moved signal).
+   * @param transferKind - Selects the Amulet vs registry funds-moved signal.
    * @returns The updateId and funds-moved verdict.
    */
   async confirmTransferred(
     payer: string,
     updateId: string,
-    instrumentAdmin?: string,
+    transferKind: TransferKind,
   ): Promise<TfExecuteResult> {
+    const isRegistry = transferKind === "registry";
     const cfg = this.deps.confirmRetry ?? DEFAULT_CONFIRM_RETRY;
     for (let i = 0; i < cfg.attempts; i++) {
       let events: Awaited<
@@ -173,16 +202,14 @@ export class TransferFactoryService {
       >["events"] = [];
       try {
         // A registry token's proof of delivery is the exercise result, which the
-        // narrow projection does not carry — ask for the full effects tree there,
-        // and only there. The Amulet path keeps the request it has always made.
-        const wantEffects = instrumentAdmin
-          ? Boolean(this.deps.tokenRegistries?.[instrumentAdmin])
-          : false;
+        // narrow projection does not carry — ask for the full effects tree there.
+        // The Amulet path reads the flat projection, whose archived Amulet is its
+        // positive signal (the effects tree reports archives as exercises).
         events = (
           await this.deps.client.getTransactionById({
             updateId,
             requestingParties: [payer],
-            ...(wantEffects ? { fullEffects: true } : {}),
+            ...(isRegistry ? { fullEffects: true } : {}),
           })
         ).events;
       } catch {
@@ -196,28 +223,22 @@ export class TransferFactoryService {
         if (ev.ArchivedEvent && AMULET_SUFFIX_RE.test(ev.ArchivedEvent.templateId ?? "")) {
           sawArchivedAmulet = true;
         }
-        if (
-          ev.CreatedEvent &&
-          TRANSFER_INSTRUCTION_SUFFIX_RE.test(ev.CreatedEvent.templateId ?? "")
-        ) {
+        if (ev.CreatedEvent && PENDING_TRANSFER_SUFFIX_RE.test(ev.CreatedEvent.templateId ?? "")) {
           sawPendingInstruction = true;
         }
       }
       if (sawAnyEvent) {
         // Amulet emits an archived `Splice.Amulet:Amulet` as the consumed input
         // (the positive "funds moved" signal). A registry token archives its own
-        // (unknown-to-us) Holding, so for a registry-utility instrument the signal
-        // is the standard's Completed result tag, falling back to "committed + not
-        // pending" when the tag cannot be read.
-        const isRegistryUtility = instrumentAdmin
-          ? Boolean(this.deps.tokenRegistries?.[instrumentAdmin])
-          : false;
+        // (unknown-to-us) Holding, so for a registry instrument the signal is the
+        // standard's Completed result tag, falling back to "committed + not
+        // pending" when the tag cannot be read. For Amulet, a created pending
+        // instruction means the input was only locked, not delivered.
         const completedByResult = transferCompletedFromResult(events);
-        const nameSaid = !sawPendingInstruction;
         return {
           updateId,
-          transferred: isRegistryUtility
-            ? (completedByResult ?? nameSaid)
+          transferred: isRegistry
+            ? (completedByResult ?? !sawPendingInstruction)
             : sawArchivedAmulet && !sawPendingInstruction,
           confirmInconclusive: false,
         };

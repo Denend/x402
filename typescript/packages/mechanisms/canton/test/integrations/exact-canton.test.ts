@@ -25,6 +25,11 @@ const CC = JSON.parse(readFileSync(FIX + "mainnet-0.1.21.json", "utf8")).transfe
 };
 
 const FAC = "facilitator::1220" + "ff".repeat(32);
+// The factory the fixture's root exercise targets — what the facilitator resolves.
+const CC_FACTORY = (() => {
+  const d = decodePrepared(CC_RAW);
+  return d.nodes.find(n => n.nodeId === d.roots[0])!.exercise!.contractId!;
+})();
 const NETWORK = "canton:mainnet" as const;
 const SYNC = "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc";
 
@@ -51,7 +56,7 @@ function clientSigner(): ClientCantonSigner {
   };
 }
 
-function facilitatorSigner(executes: string[]): FacilitatorCantonSigner {
+function facilitatorSigner(executes: string[], kinds: string[] = []): FacilitatorCantonSigner {
   return {
     getAddresses: () => [FAC],
     verifySignature: async () => ({ verified: true, preparedTxHashHex: "cd".repeat(32) }),
@@ -60,8 +65,11 @@ function facilitatorSigner(executes: string[]): FacilitatorCantonSigner {
       dso: CC.instrumentId.admin,
       expiresAt: new Date(Date.now() + 1_000_000_000).toISOString(),
     }),
-    executeSubmission: async () => {
+    registryBaseUrl: () => undefined,
+    resolveTransferFactoryId: async () => CC_FACTORY,
+    executeSubmission: async args => {
       executes.push("executed");
+      kinds.push(args.transferKind);
       return { updateId: "1220-settled", transferred: true };
     },
   };
@@ -129,7 +137,9 @@ describe("exact/canton integration (CC, stubbed signers)", () => {
 
     // 3. Facilitator verifies then settles.
     const executes: string[] = [];
-    const facilitator = new FacilitatorScheme(facilitatorSigner(executes), {
+    const kinds: string[] = [];
+    const facilitator = new FacilitatorScheme(facilitatorSigner(executes, kinds), {
+      networks: [NETWORK],
       synchronizerId:
         "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
     });
@@ -142,6 +152,8 @@ describe("exact/canton integration (CC, stubbed signers)", () => {
     expect(settle.success).toBe(true);
     expect(settle.transaction).toBe("1220-settled");
     expect(executes).toHaveLength(1);
+    // Settle executes with the transfer kind verify established.
+    expect(kinds).toEqual(["amulet"]);
   });
 
   // Fund-safety: an execute that COMMITTED but whose outcome could not be read is
@@ -176,5 +188,35 @@ describe("exact/canton integration (CC, stubbed signers)", () => {
     const settle = await facilitator.settle(payload as never, reqs);
     expect(settle.success).toBe(false);
     expect(settle.errorReason).toBe("invalid_exact_canton_execute_failed");
+  });
+});
+
+describe("registerExactCantonScheme", () => {
+  it("advertises the exact registered network in /supported, never a wildcard", async () => {
+    const { x402Facilitator } = await import("@x402/core/facilitator");
+    const { registerExactCantonScheme } = await import("../../src/exact/facilitator/register.js");
+    const f = registerExactCantonScheme(new x402Facilitator(), {
+      signer: facilitatorSigner([]),
+      networks: NETWORK,
+      synchronizerId: SYNC,
+    });
+    const kinds = f.getSupported().kinds;
+    expect(kinds.map(k => k.network)).toEqual([NETWORK]);
+    expect(kinds[0]?.extra).toMatchObject({ feePayer: FAC, synchronizerId: SYNC });
+
+    // @ts-expect-error — networks is required: a `canton:*` default would be
+    // advertised verbatim as a network in /supported.
+    registerExactCantonScheme(new x402Facilitator(), { signer: facilitatorSigner([]) });
+  });
+
+  it("rejects requirements on a network the scheme was not registered for", async () => {
+    const { reqs, payload } = await buildFlow();
+    const facilitator = new FacilitatorScheme(facilitatorSigner([]), {
+      synchronizerId: SYNC,
+      networks: ["canton:devnet"],
+    });
+    const verify = await facilitator.verify(payload as never, reqs);
+    expect(verify.isValid).toBe(false);
+    expect(verify.invalidReason).toBe("invalid_network");
   });
 });

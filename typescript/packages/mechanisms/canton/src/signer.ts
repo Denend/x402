@@ -105,16 +105,37 @@ export interface FacilitatorCantonSigner {
    * or undefined when this facilitator does not host the payer with read access.
    */
   fetchOwnedHoldingAmounts?(party: string): Promise<Map<string, string> | undefined>;
+  /**
+   * DA Registry Utility base URL for a non-Amulet CIP-56 instrument admin, or
+   * undefined when the admin is not a configured registry (Canton Coin). The
+   * signer's config is the single source of the registry map: verify selects
+   * the registry path with it and the factory is resolved against it.
+   */
+  registryBaseUrl(instrumentAdmin: string): string | undefined;
+  /**
+   * Contract id of the transfer factory for this transfer, resolved by the
+   * facilitator itself (SV Scan for Canton Coin, the registry for a CIP-56
+   * token) — never taken from the payload. Verify pins the signed root
+   * exercise to it. Implementations may cache; `refresh` bypasses the cache.
+   */
+  resolveTransferFactoryId(args: {
+    sender: string;
+    receiver: string;
+    amount: string;
+    instrumentId: { admin: string; id: string };
+    inputHoldingCids: string[];
+    refresh?: boolean;
+  }): Promise<string>;
   /** Relay the payer-signed transaction (ExecuteSubmission). Settle only. */
   executeSubmission(args: {
     preparedTransactionBytes: Buffer;
     signatureB64: string;
     payer: string;
     hashingSchemeVersion: string;
-    /** The transfer's instrument admin. Selects the funds-moved signal: an
-     *  Amulet admin uses the archived-Amulet check, a registry admin (present in
-     *  the deployment's tokenRegistries) uses the CIP-56 result-tag signal. */
-    instrumentAdmin?: string;
+    /** The transfer kind verify decoded from the signed transaction. Selects
+     *  the funds-moved signal: `amulet` uses the archived-Amulet check,
+     *  `registry` the CIP-56 result-tag signal. */
+    transferKind: "amulet" | "registry";
   }): Promise<ExecuteResult>;
 }
 
@@ -125,8 +146,6 @@ export interface CantonSchemeConfig {
   /** Which merchants this facilitator will burn its own traffic for. */
   merchantPolicy?: "open" | "provider" | "allowlist" | "provider-or-allowlist";
   merchantAllowlist?: readonly string[];
-  /** Non-Amulet CIP-56 registries (instrument admin → DA Registry Utility base URL). */
-  tokenRegistries?: Record<string, string>;
   /** Out-of-band-trusted registry infra parties (instrument admin → party[]). */
   registryTrustedParties?: Record<string, string[]>;
 }

@@ -35,6 +35,8 @@ export interface InlineVerifyResult {
   hashingSchemeVersion?: "HASHING_SCHEME_VERSION_V1" | "HASHING_SCHEME_VERSION_V2";
   preparedTxHashHex?: string;
   publishedProtocolKeys?: number;
+  /** Which funds-moved signal settle must use, as established by verify. */
+  transferKind?: "amulet" | "registry";
 }
 
 const fail = (reason: CantonErrorCode, payer = ""): InlineVerifyResult => ({
@@ -105,10 +107,23 @@ export async function verifyInlineTransfer(
   payload: PaymentPayload,
   requirements: PaymentRequirements,
   signer: FacilitatorCantonSigner,
-  config: CantonSchemeConfig & { synchronizerId?: string } = {},
+  config: CantonSchemeConfig & { synchronizerId?: string; networks?: readonly string[] } = {},
   nowMsOverride?: number,
 ): Promise<InlineVerifyResult> {
   const facilitatorParties = new Set(signer.getAddresses());
+
+  // Rule 1 — scheme + network match. The payer's accepted requirements must
+  // name the same scheme and network as the requirements being verified, and
+  // that network must be one this facilitator serves.
+  if (payload.accepted?.scheme !== "exact" || requirements.scheme !== "exact") {
+    return fail("unsupported_scheme");
+  }
+  if (payload.accepted.network !== requirements.network) {
+    return fail("invalid_network");
+  }
+  if (config.networks !== undefined && !config.networks.includes(requirements.network)) {
+    return fail("invalid_network");
+  }
 
   // Rule 2 — decode within the scheme's bounds (single-gzip framing + caps).
   let decoded;
@@ -183,6 +198,7 @@ export async function verifyInlineTransfer(
 
   let declaredInputs: string[];
   let declaredExecuteBefore: number | undefined;
+  let rootContractId: string | undefined;
   let registryDirectDelivery = false;
   try {
     assertDecodedTransferMatches(pt, {
@@ -206,8 +222,10 @@ export async function verifyInlineTransfer(
     if (ownSynchronizer !== undefined && extra.synchronizerId !== undefined) {
       assertSynchronizerMatches(pt.synchronizerId, extra.synchronizerId);
     }
-    const ex = pt.exercises.find(e => /TransferFactory_Transfer/.test(e.choiceId));
+    // The single root exercise assertDecodedTransferMatches just validated.
+    const ex = pt.nodes.find(n => n.nodeId === pt.roots[0])?.exercise;
     const t = ex?.chosenValue ? extractTransfer(ex.chosenValue) : undefined;
+    rootContractId = ex?.contractId;
     declaredInputs = t?.inputHoldingCids ?? [];
     declaredExecuteBefore = t?.executeBeforeMs;
     registryDirectDelivery = pt.exercises.some(
@@ -222,9 +240,37 @@ export async function verifyInlineTransfer(
     return fail("invalid_exact_canton_malformed_payload", payer);
   }
 
+  // Rule 3 — the root exercise must target the transfer factory this
+  // facilitator resolves itself (SV Scan for Canton Coin, the registry for a
+  // CIP-56 token). The choice name and arguments are already pinned; pinning the
+  // contract makes the choice's body — and so every consequence — the real
+  // factory's, never a look-alike template a payer deployed. One refresh covers
+  // a factory that rotated since the cached read.
+  if (!rootContractId) {
+    return fail("invalid_exact_canton_malformed_payload", payer);
+  }
+  try {
+    const resolveArgs = {
+      sender: payer,
+      receiver: requirements.payTo,
+      amount: expectedAmount,
+      instrumentId: { admin: extra.instrumentId.admin, id: extra.instrumentId.id },
+      inputHoldingCids: declaredInputs,
+    };
+    let factoryId = await signer.resolveTransferFactoryId(resolveArgs);
+    if (factoryId !== rootContractId) {
+      factoryId = await signer.resolveTransferFactoryId({ ...resolveArgs, refresh: true });
+    }
+    if (factoryId !== rootContractId) {
+      return fail("invalid_exact_canton_malformed_payload", payer);
+    }
+  } catch {
+    return fail("unexpected_canton_ledger_error", payer);
+  }
+
   // Rule 7 — merchant must hold a live preapproval (Amulet), or the registry
   // transfer must resolve `direct` (read structurally from the signed bytes).
-  const utilRegistry = config.tokenRegistries?.[extra.instrumentId.admin];
+  const utilRegistry = signer.registryBaseUrl(extra.instrumentId.admin);
   if (utilRegistry) {
     if (!registryDirectDelivery) {
       return fail("invalid_exact_canton_preapproval_missing", payer);
@@ -339,6 +385,7 @@ export async function verifyInlineTransfer(
     preparedTransactionBytes: decoded.preparedTransactionBytes,
     signatureB64: decoded.signatureB64,
     hashingSchemeVersion: decoded.hashingSchemeVersion,
+    transferKind: utilRegistry ? "registry" : "amulet",
     ...(proof.publishedProtocolKeys !== undefined
       ? { publishedProtocolKeys: proof.publishedProtocolKeys }
       : {}),

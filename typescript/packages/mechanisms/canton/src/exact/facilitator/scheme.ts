@@ -25,6 +25,10 @@ export interface CantonFacilitatorOptions extends CantonSchemeConfig {
   /** The Global Synchronizer id this facilitator settles on, advertised in the
    *  402 `extra.synchronizerId` via {@link ExactCantonScheme.getExtra}. */
   synchronizerId?: string;
+  /** The exact Canton networks this scheme serves. When set, requirements on
+   *  any other network are rejected with `invalid_network`.
+   *  {@link registerExactCantonScheme} sets it from its `networks`. */
+  networks?: readonly Network[];
 }
 
 /** Facilitator-side `exact` scheme for Canton networks. */
@@ -103,19 +107,15 @@ export class ExactCantonScheme implements SchemeNetworkFacilitator {
   ): Promise<SettleResponse> {
     const network = requirements.network;
     const v = await verifyInlineTransfer(payload, requirements, this.signer, this.options);
-    if (!v.ok || !v.preparedTransactionBytes) {
+    // Nothing is submitted without the transfer kind verify established: a
+    // wrong funds-moved signal would misreport a delivered payment.
+    if (!v.ok || !v.preparedTransactionBytes || !v.transferKind) {
       return this.settleFailure(
         v.reason ?? "invalid_exact_canton_malformed_payload",
         network,
         v.payer,
       );
     }
-
-    // The instrument admin — validated against the prepared tx in verify — selects
-    // the registry vs Amulet funds-moved signal in the signer's execute.
-    const instrumentAdmin = (
-      requirements.extra as { instrumentId?: { admin?: string } } | undefined
-    )?.instrumentId?.admin;
 
     let exec;
     try {
@@ -124,9 +124,9 @@ export class ExactCantonScheme implements SchemeNetworkFacilitator {
         signatureB64: v.signatureB64 ?? "",
         payer: v.payer,
         hashingSchemeVersion: v.hashingSchemeVersion ?? "HASHING_SCHEME_VERSION_V2",
-        ...(typeof instrumentAdmin === "string" && instrumentAdmin.length > 0
-          ? { instrumentAdmin }
-          : {}),
+        // Verify established the transfer kind from the signed bytes and the
+        // signer's registry map; settle uses that, never a second lookup.
+        transferKind: v.transferKind,
       });
     } catch (err) {
       // An unknown outcome (execute committed but the result was unreadable) is

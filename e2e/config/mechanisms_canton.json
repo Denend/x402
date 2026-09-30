@@ -13,12 +13,13 @@
     },
     "CLIENT_CANTON_PARTY": { "required": true, "roles": ["client"] },
     "CLIENT_CANTON_PRIVATE_KEY": { "required": true, "roles": ["client"] },
-    "SERVER_CANTON_PAYTO": { "required": true, "roles": ["server"] },
+    "SERVER_CANTON_ADDRESS": { "required": true, "roles": ["server"] },
     "SERVER_CANTON_INSTRUMENT_ADMIN": {
       "required": true,
       "roles": ["server"]
     },
-    "FACILITATOR_CANTON_PARTY": { "required": true, "roles": ["facilitator"] }
+    "FACILITATOR_CANTON_PARTY": { "required": true, "roles": ["facilitator"] },
+    "CANTON_SCAN_TOKEN": { "required": false, "roles": ["client", "facilitator"] }
   },
   "testnet": {
     "name": "Canton DevNet",

@@ -62,6 +62,18 @@ describe("inline-codec", () => {
     expect(() => decodeInlinePayload(bad)).toThrow(InlineCodecError);
   });
 
+  it("rejects junk between the deflate stream and a valid trailer", () => {
+    // header ‖ deflate ‖ JUNK ‖ trailer: raw inflate stops at the final block
+    // and ignores the junk, and the trailer still matches the real output.
+    const g = Buffer.from(encodeInlinePayload(RAW));
+    const bad = Buffer.concat([
+      g.subarray(0, g.length - 8),
+      Buffer.from("JUNKJUNK", "utf8"),
+      g.subarray(g.length - 8),
+    ]);
+    expect(() => decodeInlinePayload(bad)).toThrow(/bytes after the deflate stream/);
+  });
+
   it("rejects two identical concatenated members (the seam the trailer cannot catch)", () => {
     const g = encodeInlinePayload(Buffer.from("hi", "utf8"));
     expect(() => decodeInlinePayload(Buffer.concat([g, g]))).toThrow(InlineCodecError);

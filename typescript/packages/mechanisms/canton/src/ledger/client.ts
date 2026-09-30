@@ -357,7 +357,8 @@ export class CantonClient {
    * @param party - The acting party.
    * @param submissionId - The submission to find.
    * @param beginExclusive - Offset to read completions after.
-   * @returns The settled updateId, a rejection message, or absent.
+   * @returns The settled updateId, a rejection message, a malformed completion
+   *   (outcome unknown), or absent.
    */
   async findCompletion(
     userId: string,
@@ -367,16 +368,25 @@ export class CantonClient {
   ): Promise<
     | { kind: "settled"; updateId: string }
     | { kind: "rejected"; message: string }
+    | { kind: "malformed"; message: string }
     | { kind: "absent" }
   > {
     for (const v of await this.readCompletions(userId, party, beginExclusive)) {
       if (v.submissionId !== submissionId) continue;
-      if (!v.status || v.status.code === 0) {
-        return { kind: "settled", updateId: v.updateId ?? "" };
+      // proto3 JSON omits a zero code, so an absent status or an absent code
+      // is OK (0). A rejection needs a definite non-zero integer code; a code
+      // we cannot read is not proof that nothing moved.
+      const code: unknown = v.status?.code ?? 0;
+      if (typeof code === "number" && Number.isInteger(code) && code !== 0) {
+        return { kind: "rejected", message: v.status?.message || `status ${code}` };
+      }
+      // Success needs the OK code AND the committed updateId.
+      if (code === 0 && typeof v.updateId === "string" && v.updateId) {
+        return { kind: "settled", updateId: v.updateId };
       }
       return {
-        kind: "rejected",
-        message: v.status.message || `status ${v.status.code}`,
+        kind: "malformed",
+        message: "completion carries no updateId or a non-numeric status",
       };
     }
     return { kind: "absent" };
@@ -407,6 +417,9 @@ export class CantonClient {
           `interactive submission rejected: ${found.message}`,
           "SUBMISSION_FAILED",
         );
+      }
+      if (found.kind === "malformed") {
+        throw new CantonError(`unreadable completion: ${found.message}`, "INVALID_RESPONSE");
       }
       await new Promise(r => setTimeout(r, 600));
     }

@@ -294,7 +294,10 @@ if (cantonConfigured) {
   });
   facilitator.register(
     CANTON_NETWORK,
-    new ExactCantonScheme(cantonSigner, { synchronizerId: cantonSynchronizerId! }),
+    new ExactCantonScheme(cantonSigner, {
+      synchronizerId: cantonSynchronizerId!,
+      networks: [CANTON_NETWORK],
+    }),
   );
   console.info(
     `Canton Facilitator party: ${cantonFacilitatorParty} on ${CANTON_NETWORK}`,

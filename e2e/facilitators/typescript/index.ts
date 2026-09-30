@@ -282,6 +282,7 @@ if (
     userId: process.env.CANTON_USER_ID,
     synchronizerId: process.env.CANTON_SYNCHRONIZER_ID,
     scanUrl: process.env.CANTON_SCAN_URL,
+    ...(process.env.CANTON_SCAN_TOKEN ? { scanToken: process.env.CANTON_SCAN_TOKEN } : {}),
     facilitatorParties: [process.env.FACILITATOR_CANTON_PARTY],
     ...(process.env.CANTON_TOKEN_REGISTRIES
       ? { tokenRegistries: JSON.parse(process.env.CANTON_TOKEN_REGISTRIES) }
@@ -648,9 +649,7 @@ if (cantonSigner) {
     CANTON_NETWORK as Network,
     new ExactCantonScheme(cantonSigner, {
       synchronizerId: process.env.CANTON_SYNCHRONIZER_ID as string,
-      ...(process.env.CANTON_TOKEN_REGISTRIES
-        ? { tokenRegistries: JSON.parse(process.env.CANTON_TOKEN_REGISTRIES) }
-        : {}),
+      networks: [CANTON_NETWORK as Network],
       ...(process.env.CANTON_REGISTRY_TRUSTED_PARTIES
         ? { registryTrustedParties: JSON.parse(process.env.CANTON_REGISTRY_TRUSTED_PARTIES) }
         : {}),
