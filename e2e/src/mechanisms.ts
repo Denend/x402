@@ -30,7 +30,7 @@ export type ConfigRole = 'server' | 'client' | 'facilitator';
 /** Network id, e.g. "evm" — one per `mechanisms_<id>.json` file. No fixed union: adding a network is a catalog-only edit. */
 export type CatalogNetworkId = string;
 
-type PaymentScheme = 'exact' | 'upto' | 'batch-settlement';
+type PaymentScheme = 'exact' | 'upto' | 'batch-settlement' | 'auth-capture';
 type AssetTransferMethod =
   | 'eip3009'
   | 'permit2'
@@ -117,8 +117,10 @@ export type RouteDefinition = {
   scheme: PaymentScheme;
   network: CatalogNetworkId;
   assetTransferMethod?: AssetTransferMethod;
-  /** SDKs that implement this route. */
+  /** SDKs that implement this route end to end (client, server and facilitator). */
   sdks: SdkId[];
+  /** SDKs that implement only the client role. Servers and facilitators never see them. */
+  clientSdks?: SdkId[];
   schemeOptions?: Record<string, boolean>;
   /** Every route declares its own price. */
   price: PriceSpec;
@@ -134,10 +136,14 @@ export type RouteDefinition = {
   paymentFlow?: PaymentFlow;
   /** Omit this route unless the named env var is set (optional add-on routes). */
   requiresEnv?: string;
+  /** Omit this route when the named env var is set (mutually exclusive add-on routes). */
+  requiresEnvAbsent?: string;
   /** Payment completion window advertised on this route. */
   maxTimeoutSeconds?: number;
   /** Merged into the route payment option's `extra` (wire `PaymentRequirements.extra`). */
   requirementsExtra?: Record<string, unknown>;
+  /** Scheme-specific `accepts.extra` fields (e.g. auth-capture deadlines and flow). */
+  schemeExtra?: Record<string, string | number | boolean>;
 };
 
 /** Fixed success body for every paid route (`timestamp` is added by the server). */
@@ -188,6 +194,7 @@ type EndpointLike = {
   paymentFlow?: PaymentFlow;
   schemeOptions?: Record<string, boolean>;
   extensions?: string[];
+  schemeExtra?: Record<string, string | number | boolean>;
   health?: boolean;
   close?: boolean;
   /** MCP tool name, equal to `path` for MCP endpoints (`method: 'tool'`). */
@@ -283,9 +290,14 @@ export function getRouteDefinition(path: string): RouteDefinition {
   return def;
 }
 
-export function sdkRoutesFor(sdk: string): SdkRoute[] {
+/** Routes an SDK implements. With `role: 'client'`, routes it implements only as a client are included. */
+export function sdkRoutesFor(sdk: string, role?: ConfigRole): SdkRoute[] {
   return Object.entries(catalog.routes)
-    .filter(([, def]) => def.sdks.includes(sdk as SdkId))
+    .filter(
+      ([, def]) =>
+        def.sdks.includes(sdk as SdkId) ||
+        (role === 'client' && def.clientSdks?.includes(sdk as SdkId)),
+    )
     .map(([path, def]) => ({ path, ...def }));
 }
 
@@ -308,9 +320,13 @@ export function schemesForSdk(sdk: string): PaymentScheme[] {
 }
 
 /** Schemes an SDK implements for one catalog network (from route `sdks`). */
-export function schemesForSdkNetwork(sdk: string, network: CatalogNetworkId): PaymentScheme[] {
+export function schemesForSdkNetwork(
+  sdk: string,
+  network: CatalogNetworkId,
+  role?: ConfigRole,
+): PaymentScheme[] {
   const schemes = new Set<PaymentScheme>();
-  for (const route of sdkRoutesFor(sdk)) {
+  for (const route of sdkRoutesFor(sdk, role)) {
     if (route.network === network) {
       schemes.add(route.scheme);
     }
@@ -327,8 +343,9 @@ export function schemesForComponent(
   sdk: string,
   network: CatalogNetworkId,
   declaredSchemes: PaymentScheme[] | undefined,
+  role?: ConfigRole,
 ): PaymentScheme[] {
-  const sdkSchemes = schemesForSdkNetwork(sdk, network);
+  const sdkSchemes = schemesForSdkNetwork(sdk, network, role);
   if (!declaredSchemes?.length) {
     return sdkSchemes;
   }
@@ -391,6 +408,7 @@ export function sdkRouteToEndpoint(route: SdkRoute, transport: RouteTransport = 
       paymentFlow: route.paymentFlow,
       schemeOptions: route.schemeOptions,
       extensions: route.extensions,
+      ...(route.schemeExtra ? { schemeExtra: route.schemeExtra } : {}),
     };
   }
 
@@ -405,6 +423,7 @@ export function sdkRouteToEndpoint(route: SdkRoute, transport: RouteTransport = 
     paymentFlow: route.paymentFlow,
     schemeOptions: route.schemeOptions,
     extensions: route.extensions,
+    ...(route.schemeExtra ? { schemeExtra: route.schemeExtra } : {}),
   };
 }
 
@@ -477,11 +496,17 @@ export type RouteFilter = {
 };
 
 export function routeEnvSatisfied(route: SdkRoute, env: EnvLookup): boolean {
-  if (!route.requiresEnv) {
-    return true;
+  if (route.requiresEnv && !env(route.requiresEnv)?.trim()) {
+    return false;
   }
-  return Boolean(env(route.requiresEnv)?.trim());
+  if (route.requiresEnvAbsent && env(route.requiresEnvAbsent)?.trim()) {
+    return false;
+  }
+  return true;
 }
+
+/** Harness-only POST path to trigger deferred auth-capture lifecycle capture on e2e servers. */
+export const AUTH_CAPTURE_E2E_CAPTURE_PATH = '/__e2e/auth-capture/capture';
 
 export function filterRoutes(routes: SdkRoute[], filter?: RouteFilter): SdkRoute[] {
   if (!filter?.excludeSchemes?.length && !filter?.excludeNetworks?.length) {
@@ -672,7 +697,7 @@ export function enrichConfigFromMechanisms(
     excludeSchemes: config.excludeSchemes as string[] | undefined,
     excludeNetworks: config.excludeNetworks as string[] | undefined,
   };
-  const routes = availableRoutes(sdkRoutesFor(sdk), key => process.env[key], filter);
+  const routes = availableRoutes(sdkRoutesFor(sdk, type), key => process.env[key], filter);
 
   const fromCatalog = NETWORK_IDS.filter(id => routes.some(route => route.network === id));
   const protocolFamilies =
@@ -1044,6 +1069,7 @@ export function resolvePaymentRoutes(
       route.requirementsExtra ? { ...route.requirementsExtra, ...networkExtra } : networkExtra,
       route.paymentFlow,
     );
+    const mergedExtra = route.schemeExtra ? { ...(extra ?? {}), ...route.schemeExtra } : extra;
 
     resolved.push({
       path: route.path,
@@ -1052,7 +1078,7 @@ export function resolvePaymentRoutes(
       network: caip2,
       payTo,
       price,
-      ...(extra ? { extra } : {}),
+      ...(mergedExtra ? { extra: mergedExtra } : {}),
       ...(route.maxTimeoutSeconds ? { maxTimeoutSeconds: route.maxTimeoutSeconds } : {}),
       extensions: route.extensions ?? [],
       ...(route.settlementOverride ? { settlementOverride: route.settlementOverride } : {}),

@@ -35,6 +35,7 @@ import (
 	"github.com/x402-foundation/x402/go/v2/extensions/erc20approvalgassponsor"
 	exttypes "github.com/x402-foundation/x402/go/v2/extensions/types"
 	evmmech "github.com/x402-foundation/x402/go/v2/mechanisms/evm"
+	authcapturefacilitator "github.com/x402-foundation/x402/go/v2/mechanisms/evm/auth-capture/facilitator"
 	"github.com/x402-foundation/x402/go/v2/mechanisms/evm/batch-settlement"
 	batchedevm "github.com/x402-foundation/x402/go/v2/mechanisms/evm/batch-settlement/facilitator"
 	exactevm "github.com/x402-foundation/x402/go/v2/mechanisms/evm/exact/facilitator"
@@ -246,6 +247,19 @@ func (s *realFacilitatorEvmSigner) ReadContract(
 	method string,
 	args ...interface{},
 ) (interface{}, error) {
+	return s.ReadContractFrom(ctx, s.address.Hex(), contractAddress, abiJSON, method, args...)
+}
+
+// ReadContractFrom reads as an explicit sender, which the auth-capture escrow requires
+// because it gates authorize, capture and void on msg.sender.
+func (s *realFacilitatorEvmSigner) ReadContractFrom(
+	ctx context.Context,
+	from string,
+	contractAddress string,
+	abiJSON []byte,
+	method string,
+	args ...interface{},
+) (interface{}, error) {
 	// Parse ABI
 	contractABI, err := abi.JSON(strings.NewReader(string(abiJSON)))
 	if err != nil {
@@ -267,7 +281,7 @@ func (s *realFacilitatorEvmSigner) ReadContract(
 	// msg.sender == witness.facilitator in settle().
 	to := common.HexToAddress(contractAddress)
 	msg := ethereum.CallMsg{
-		From: s.address,
+		From: common.HexToAddress(from),
 		To:   &to,
 		Data: data,
 	}
@@ -303,55 +317,7 @@ func (s *realFacilitatorEvmSigner) WriteContract(
 	dataSuffix []byte,
 	args ...interface{},
 ) (string, error) {
-	// Parse ABI
-	contractABI, err := abi.JSON(strings.NewReader(string(abiJSON)))
-	if err != nil {
-		return "", fmt.Errorf("failed to parse ABI: %w", err)
-	}
-
-	// Pack the method call
-	data, err := contractABI.Pack(method, args...)
-	if err != nil {
-		return "", fmt.Errorf("failed to pack method call: %w", err)
-	}
-	data = evmmech.AppendDataSuffix(data, dataSuffix)
-
-	// Get nonce
-	nonce, err := s.reserveNonce(ctx)
-	if err != nil {
-		return "", err
-	}
-
-	// Get gas price
-	gasPrice, err := s.client.SuggestGasPrice(ctx)
-	if err != nil {
-		return "", fmt.Errorf("failed to get gas price: %w", err)
-	}
-
-	// Create transaction
-	to := common.HexToAddress(contractAddress)
-	tx := types.NewTransaction(
-		nonce,
-		to,
-		big.NewInt(0), // value
-		300000,        // gas limit
-		gasPrice,
-		data,
-	)
-
-	// Sign transaction
-	signedTx, err := types.SignTx(tx, types.LatestSignerForChainID(s.chainID), s.privateKey)
-	if err != nil {
-		return "", fmt.Errorf("failed to sign transaction: %w", err)
-	}
-
-	// Send transaction
-	err = s.client.SendTransaction(ctx, signedTx)
-	if err != nil {
-		return "", fmt.Errorf("failed to send transaction: %w", err)
-	}
-
-	return signedTx.Hash().Hex(), nil
+	return s.writeContract(ctx, contractAddress, abiJSON, method, dataSuffix, 0, args...)
 }
 
 func (s *realFacilitatorEvmSigner) SendTransaction(
@@ -408,6 +374,7 @@ func (s *realFacilitatorEvmSigner) WaitForTransactionReceipt(ctx context.Context
 				Status:      uint64(receipt.Status),
 				BlockNumber: receipt.BlockNumber.Uint64(),
 				TxHash:      receipt.TxHash.Hex(),
+				Logs:        receipt.Logs,
 			}, nil
 		}
 		time.Sleep(1 * time.Second)
@@ -1063,6 +1030,32 @@ func main() {
 			batchedevm.NewBatchSettlementEvmScheme(evmSigner, batchedAuthorizer),
 		)
 
+		authCaptureDelegatedStorage := authcapturefacilitator.NewInMemoryAuthCaptureDelegatedAuthStorage()
+		authCaptureAuthorizer, err := newBatchedAuthorizerSigner(evmPrivateKey)
+		if err != nil {
+			log.Fatalf("Failed to create auth-capture delegated authorizer: %v", err)
+		}
+		log.Printf("EVM Receiver Authorizer (auth-capture): %s", authCaptureAuthorizer.Address())
+		customOperators := authCaptureCustomOperators()
+		if len(customOperators) > 0 {
+			log.Printf("EVM Auth-capture custom operators: %v", customOperators)
+		}
+		facilitator.Register(
+			[]x402.Network{x402.Network(evmNetwork)},
+			authcapturefacilitator.NewAuthCaptureEvmScheme(evmSigner, authcapturefacilitator.AuthCaptureEvmSchemeConfig{
+				CaptureAuthorizer: addresses[0],
+				AuthorizerSigner:  authCaptureAuthorizer,
+				DelegatedAuthStorage: authCaptureDelegatedStorage,
+				ResolveCallerIdentity: func(ctx context.Context, _ authcapturefacilitator.DelegatedSettleContext) (string, error) {
+					return "x402-e2e", nil
+				},
+				OnStorageError: func(err error, network x402.Network, paymentInfoHash string) {
+					log.Printf("[delegated-auth-storage] network=%s paymentInfoHash=%s err=%v", network, paymentInfoHash, err)
+				},
+				Operators: customOperators,
+			}),
+		)
+
 		evmV1Config := &exactevmv1.ExactEvmSchemeV1Config{}
 		facilitator.RegisterV1(
 			[]x402.Network{x402.Network(getV1EvmNetwork(evmNetwork))},
@@ -1488,4 +1481,9 @@ func main() {
 	if err := router.Run(":" + port); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+}
+
+// WriteContractFrom ignores from: this signer holds a single address.
+func (r *realFacilitatorEvmSigner) WriteContractFrom(ctx context.Context, _, address string, abiJSON []byte, functionName string, dataSuffix []byte, args ...interface{}) (string, error) {
+	return r.WriteContract(ctx, address, abiJSON, functionName, dataSuffix, args...)
 }
