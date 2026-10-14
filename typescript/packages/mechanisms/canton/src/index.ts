@@ -59,6 +59,14 @@ export { ExactCantonScheme as ExactCantonFacilitatorScheme } from "./exact/facil
 // Concrete ledger-backed signers (participant JSON Ledger API + Scan + official
 // core-tx-visualizer hashing). An integrator may inject their own instead.
 export { toClientCantonSigner, toFacilitatorCantonSigner } from "./signer-factory.js";
+
+// Merchant setup: the TransferPreapproval a merchant needs to be paid.
+export { ensureTransferPreapproval } from "./preapproval.js";
+export type {
+  TransferPreapprovalSetupConfig,
+  EnsureTransferPreapprovalOptions,
+  EnsureTransferPreapprovalResult,
+} from "./preapproval.js";
 export type {
   CantonLedgerConfig,
   CantonScanConfig,

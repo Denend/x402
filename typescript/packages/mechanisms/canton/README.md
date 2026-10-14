@@ -100,6 +100,41 @@ running several replicas should pass a shared store as `pendingSettlementStore`,
 and one serving long `executeBefore` windows should keep entries at least until
 the deadline plus `ledgerTimeToleranceMs` (default 120000).
 
+## Merchant setup
+
+A merchant can be paid only while it holds a live Canton Coin
+`TransferPreapproval` (spec: Merchant Onboarding); without one, verification
+refuses the payment. `ensureTransferPreapproval` creates it for a merchant that
+is an external party, or renews it when it expires within `renewWithinMs`
+(default 7 days). The merchant signs with its own key and pays the small
+preapproval fee from its own Canton Coin.
+
+```ts
+import { ensureTransferPreapproval } from "@x402/canton";
+
+await ensureTransferPreapproval(
+  {
+    participantUrl: process.env.CANTON_PARTICIPANT_URL!,
+    token: process.env.CANTON_TOKEN!,
+    userId: process.env.CANTON_USER_ID!,
+    synchronizerId: process.env.CANTON_SYNCHRONIZER_ID!,
+    scanUrl: process.env.CANTON_SCAN_URL!,
+    party: process.env.CANTON_ADDRESS!,
+    privateKeyPem: process.env.CANTON_PRIVATE_KEY!,
+  },
+  { expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000) },
+);
+```
+
+Run it once before serving and again before the preapproval expires; it does
+nothing while the preapproval is far from expiry. The e2e suite runs it as
+`pnpm canton:setup` and the advanced server example as
+`pnpm setup:canton-preapproval`. A registry token's preapproval is created with
+its registrar (the DA Registry Utility), not with this helper.
+
+On DevNet, fund the merchant from a
+[CC tap](https://docs.canton.network/sdks-tools/sdks/wallet-sdk/guides/performing-a-cc-tap).
+
 ## Payment requirements (`extra`)
 
 ```jsonc

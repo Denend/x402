@@ -43,6 +43,9 @@ importers:
       '@x402/avm':
         specifier: workspace:*
         version: link:../typescript/packages/mechanisms/avm
+      '@x402/canton':
+        specifier: workspace:*
+        version: link:../typescript/packages/mechanisms/canton
       '@x402/cardano':
         specifier: workspace:*
         version: link:../typescript/packages/mechanisms/cardano

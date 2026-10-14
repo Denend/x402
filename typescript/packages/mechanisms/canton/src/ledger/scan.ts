@@ -1,7 +1,8 @@
 /**
- * Scan / registry reads for the exact-scheme client — the subset that resolves a
- * transfer factory (client prepare) and reads a merchant's TransferPreapproval
- * and its expiry (merchant onboarding).
+ * Scan / registry reads for the exact-scheme client and merchant setup — the
+ * subset that resolves a transfer factory (client prepare), reads a merchant's
+ * TransferPreapproval and its expiry, and reads the AmuletRules and mining rounds
+ * a preapproval is created or renewed against (merchant onboarding).
  *
  * Amulet (Canton Coin) reads route to the SV Scan; a non-Amulet CIP-56 token
  * whose `instrumentId.admin` maps to a DA Registry Utility base URL routes there
@@ -39,6 +40,23 @@ export interface TransferPreapprovalRecord {
   validFrom?: string;
   lastRenewedAt?: string;
 }
+
+/** A DSO contract as Scan serves it, ready to disclose. */
+export interface ScanContract<P> {
+  contract_id: string;
+  template_id: string;
+  created_event_blob: string;
+  payload: P;
+}
+
+/** The DSO's AmuletRules and the synchronizer it lives on. */
+export interface AmuletRulesView {
+  contract: ScanContract<{ dso: string }>;
+  synchronizerId: string;
+}
+
+/** A mining round as Scan serves it. */
+export type MiningRoundContract = ScanContract<{ round: { number: string }; opensAt?: string }>;
 
 /** A resolved transfer factory plus the disclosed contracts/context needed to
  *  exercise `TransferFactory_Transfer`. */
@@ -195,6 +213,61 @@ export class ScanClient {
       expiresAt: payload.expiresAt,
       ...(payload.validFrom !== undefined ? { validFrom: payload.validFrom } : {}),
       ...(payload.lastRenewedAt !== undefined ? { lastRenewedAt: payload.lastRenewedAt } : {}),
+    };
+  }
+
+  /**
+   * The DSO's current AmuletRules contract, with its synchronizer. SV Scan serves
+   * it on POST wrapped as `amulet_rules_update`; a validator's scan-proxy on GET.
+   *
+   * @returns The AmuletRules contract and synchronizer id.
+   */
+  async getAmuletRules(): Promise<AmuletRulesView> {
+    type Rules = { contract: ScanContract<{ dso: string }>; domain_id: string };
+    const rules = this.isSv
+      ? (
+          await this.requestBases<{ amulet_rules_update: Rules }>(
+            "POST",
+            `${this.prefix}/amulet-rules`,
+            {},
+            [this.scanUrl, ...this.fallbackUrls],
+          )
+        ).amulet_rules_update
+      : (await this.get<{ amulet_rules: Rules }>(`${this.prefix}/amulet-rules`)).amulet_rules;
+    if (!rules?.contract?.contract_id || !rules.domain_id) {
+      throw new CantonError("scan: amulet-rules returned no contract", "INVALID_RESPONSE");
+    }
+    return { contract: rules.contract, synchronizerId: rules.domain_id };
+  }
+
+  /**
+   * The open and issuing mining rounds. SV Scan answers a POST with keyed maps;
+   * a validator's scan-proxy answers a GET with arrays. Both come back as arrays.
+   *
+   * @returns The open and issuing rounds.
+   */
+  async getOpenAndIssuingMiningRounds(): Promise<{
+    open: MiningRoundContract[];
+    issuing: MiningRoundContract[];
+  }> {
+    type Entry = { contract: MiningRoundContract };
+    type Rounds<C> = { open_mining_rounds?: C; issuing_mining_rounds?: C };
+    if (this.isSv) {
+      const raw = await this.requestBases<Rounds<Record<string, Entry>>>(
+        "POST",
+        `${this.prefix}/open-and-issuing-mining-rounds`,
+        { cached_open_mining_round_contract_ids: [], cached_issuing_round_contract_ids: [] },
+        [this.scanUrl, ...this.fallbackUrls],
+      );
+      return {
+        open: Object.values(raw.open_mining_rounds ?? {}).map(e => e.contract),
+        issuing: Object.values(raw.issuing_mining_rounds ?? {}).map(e => e.contract),
+      };
+    }
+    const raw = await this.get<Rounds<Entry[]>>(`${this.prefix}/open-and-issuing-mining-rounds`);
+    return {
+      open: (raw.open_mining_rounds ?? []).map(e => e.contract),
+      issuing: (raw.issuing_mining_rounds ?? []).map(e => e.contract),
     };
   }
 
