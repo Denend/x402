@@ -6,7 +6,7 @@
     },
     "CANTON_TOKEN": { "required": true, "roles": ["client", "facilitator"] },
     "CANTON_USER_ID": { "required": true, "roles": ["client", "facilitator"] },
-    "CANTON_SCAN_URL": { "required": true, "roles": ["client", "facilitator"] },
+    "CANTON_SCAN_URL": { "required": true, "roles": ["client"] },
     "CANTON_SYNCHRONIZER_ID": {
       "required": true,
       "roles": ["client", "server", "facilitator"]
@@ -19,7 +19,7 @@
       "roles": ["server"]
     },
     "FACILITATOR_CANTON_PARTY": { "required": true, "roles": ["facilitator"] },
-    "CANTON_SCAN_TOKEN": { "required": false, "roles": ["client", "facilitator"] }
+    "CANTON_SCAN_TOKEN": { "required": false, "roles": ["client"] }
   },
   "testnet": {
     "name": "Canton DevNet",

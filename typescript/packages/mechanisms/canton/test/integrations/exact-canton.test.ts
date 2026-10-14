@@ -183,22 +183,22 @@ describe("exact/canton integration (CC, stubbed signers)", () => {
   });
 });
 
-describe("registerExactCantonScheme", () => {
-  it("advertises the exact registered network in /supported, never a wildcard", async () => {
+describe("facilitator registration", () => {
+  it("advertises the exact registered network in /supported", async () => {
     const { x402Facilitator } = await import("@x402/core/facilitator");
-    const { registerExactCantonScheme } = await import("../../src/exact/facilitator/register.js");
-    const f = registerExactCantonScheme(new x402Facilitator(), {
-      signer: facilitatorSigner([]),
-      networks: NETWORK,
-      synchronizerId: SYNC,
-    });
+    const f = new x402Facilitator().register(
+      NETWORK,
+      new FacilitatorScheme(facilitatorSigner([]), { networks: [NETWORK], synchronizerId: SYNC }),
+    );
     const kinds = f.getSupported().kinds;
     expect(kinds.map(k => k.network)).toEqual([NETWORK]);
     expect(kinds[0]?.extra).toMatchObject({ feePayer: FAC, synchronizerId: SYNC });
+  });
 
-    // @ts-expect-error — networks is required: a `canton:*` default would be
-    // advertised verbatim as a network in /supported.
-    registerExactCantonScheme(new x402Facilitator(), { signer: facilitatorSigner([]) });
+  it("refuses to construct without a served network", () => {
+    expect(() => new FacilitatorScheme(facilitatorSigner([]), { networks: [] })).toThrow(
+      /networks/,
+    );
   });
 
   it("rejects requirements on a network the scheme was not registered for", async () => {

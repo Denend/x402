@@ -22,16 +22,30 @@ split); an integrator may inject their own implementation instead. Operational
 concerns of a facilitator deployment (rate limits, attribution, traffic
 accounting) live in the facilitator, not here.
 
-```ts
-import { toFacilitatorCantonSigner } from "@x402/canton";
+The facilitator needs only its participant. Verify proves the transfer factory,
+the direct delivery to the merchant and the payer's input holdings from the
+input contracts carried in the signed transaction, which the ledger
+authenticates when it executes; it reads no Scan or registry.
 
-const facilitatorCantonSigner = toFacilitatorCantonSigner({
+```ts
+import { toClientCantonSigner, toFacilitatorCantonSigner } from "@x402/canton";
+
+const clientCantonSigner = toClientCantonSigner({
   participantUrl: process.env.CANTON_PARTICIPANT_URL!,
   token: process.env.CANTON_TOKEN!,          // static bearer or a resolver
   userId: process.env.CANTON_USER_ID!,
   synchronizerId: process.env.CANTON_SYNCHRONIZER_ID!,
-  scanUrl: process.env.CANTON_SCAN_URL!,      // public SV Scan: no token needed
+  scanUrl: process.env.CANTON_SCAN_URL!,      // SV Scan: resolves the transfer factory
   // scanToken: "…",                         // only for a gated Scan; the ledger token is never sent to Scan
+  party: process.env.CLIENT_CANTON_PARTY!,
+  privateKeyPem: process.env.CLIENT_CANTON_PRIVATE_KEY!,
+});
+
+const facilitatorCantonSigner = toFacilitatorCantonSigner({
+  participantUrl: process.env.CANTON_PARTICIPANT_URL!,
+  token: process.env.CANTON_TOKEN!,
+  userId: process.env.CANTON_USER_ID!,
+  synchronizerId: process.env.CANTON_SYNCHRONIZER_ID!,
   facilitatorParties: [process.env.CANTON_FACILITATOR_PARTY!],
 });
 ```
@@ -43,26 +57,48 @@ Each role is registered onto the corresponding `@x402/core` instance.
 ```ts
 // Client (payer)
 import { x402Client } from "@x402/core/client";
-import { registerExactCantonScheme } from "@x402/canton/exact/client";
+import { ExactCantonScheme } from "@x402/canton/exact/client";
 
-registerExactCantonScheme(client, { signer: clientCantonSigner });
+const client = new x402Client().register("canton:*", new ExactCantonScheme(clientCantonSigner));
 
 // Resource server (merchant)
 import { x402ResourceServer } from "@x402/core/server";
-import { registerExactCantonScheme } from "@x402/canton/exact/server";
+import { ExactCantonScheme } from "@x402/canton/exact/server";
 
-registerExactCantonScheme(server);
+server.register("canton:*", new ExactCantonScheme());
 
 // Facilitator
 import { x402Facilitator } from "@x402/core/facilitator";
-import { registerExactCantonScheme } from "@x402/canton/exact/facilitator";
+import { ExactCantonScheme } from "@x402/canton/exact/facilitator";
 
-registerExactCantonScheme(facilitator, {
-  signer: facilitatorCantonSigner,
-  synchronizerId: "global-domain::1220…",
-  networks: "canton:mainnet",   // required: the exact network(s) served
-});
+facilitator.register(
+  "canton:mainnet",
+  new ExactCantonScheme(facilitatorCantonSigner, {
+    networks: ["canton:mainnet"], // required: the networks this facilitator settles on
+    synchronizerId: "global-domain::1220…",
+  }),
+);
 ```
+
+Both payment flows are supported: `authorization` (verify, then settle after the
+handler) and `upfront` (settle before the handler; set `paymentFlow: "upfront"`
+in the route's `extra`).
+
+## Settlement
+
+Settle succeeds once the transaction is committed and returns its `updateId`.
+If the participant accepted the transaction but its outcome could not be read,
+settle returns the non-terminal `settlement_pending`, with the prepared
+transaction's hash as `transaction`, and remembers the submission in a
+`PendingSettlementStore`. A retry of the same payload looks the submission up
+instead of relaying it again. The transaction cannot commit after its
+`executeBefore` plus the synchronizer's ledger-time tolerance, so once that has
+passed a submission that is still not on the ledger is reported as failed.
+
+The default store is in-memory, per process, with a 5-minute TTL. A facilitator
+running several replicas should pass a shared store as `pendingSettlementStore`,
+and one serving long `executeBefore` windows should keep entries at least until
+the deadline plus `ledgerTimeToleranceMs` (default 120000).
 
 ## Payment requirements (`extra`)
 
@@ -90,13 +126,21 @@ over the hash) and `hashingSchemeVersion`.
 
 ## CIP-56 registry tokens
 
-A non-Amulet token names its registrar as `instrumentId.admin`. Its
-`TransferFactory_Transfer` also names the DA Registry Utility operator (and, for
-a bridged token, the bridge operator) as signatories/observers; pass those
-out-of-band-trusted infra parties via `CantonSchemeConfig.registryTrustedParties`
-(and the registrar's utility base URL via the signer's `tokenRegistries`, the
-single source for both verify and settle). Registry support
-is a superset of Canton Coin and is gated on the corresponding spec amendment.
+A non-Amulet token names its registrar as `instrumentId.admin` and `asset` is the
+token's symbol. A facilitator settles a registrar's token only when the
+registrar is listed in `registryTrustedParties`, mapped to the registry
+infrastructure parties that appear in its transfers (the DA Registry Utility
+operator and, for a bridged token, the bridge operator):
+
+```ts
+new ExactCantonScheme(facilitatorCantonSigner, {
+  networks: ["canton:mainnet"],
+  registryTrustedParties: { "<registrar>::1220…": ["<operator>::1220…", "<provider>::1220…"] },
+});
+```
+
+The client resolves a registry token's factory on the registrar's DA Registry
+Utility, configured per registrar with the client signer's `tokenRegistries`.
 
 ## Testing
 

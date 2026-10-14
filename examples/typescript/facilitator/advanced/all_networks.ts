@@ -103,19 +103,17 @@ const aptosPrivateKey = process.env.APTOS_PRIVATE_KEY as string | undefined;
 const aptosRpcUrl = process.env.APTOS_RPC_URL as string | undefined;
 const casperPrivateKey = process.env.CASPER_PRIVATE_KEY as string | undefined;
 const casperRpcUrl = process.env.CASPER_RPC_URL as string | undefined;
-// Canton: a hosted participant + SV Scan + the facilitator's own relaying party.
+// Canton: a hosted participant + the facilitator's own relaying party.
 const cantonParticipantUrl = process.env.CANTON_PARTICIPANT_URL as string | undefined;
 const cantonToken = process.env.CANTON_TOKEN as string | undefined;
 const cantonUserId = process.env.CANTON_USER_ID as string | undefined;
 const cantonSynchronizerId = process.env.CANTON_SYNCHRONIZER_ID as string | undefined;
-const cantonScanUrl = process.env.CANTON_SCAN_URL as string | undefined;
 const cantonFacilitatorParty = process.env.CANTON_FACILITATOR_PARTY as string | undefined;
 const cantonConfigured = Boolean(
   cantonParticipantUrl &&
     cantonToken &&
     cantonUserId &&
     cantonSynchronizerId &&
-    cantonScanUrl &&
     cantonFacilitatorParty,
 );
 const ccdFacilitatorPrivateKey = process.env.CCD_FACILITATOR_PRIVATE_KEY as
@@ -161,7 +159,7 @@ if (
   !(hederaAccountId && hederaPrivateKey)
 ) {
   console.error(
-    "❌ At least one of AVM_PRIVATE_KEY, APTOS_PRIVATE_KEY, CARDANO_MNEMONIC, CASPER_PRIVATE_KEY, CANTON_PARTICIPANT_URL + CANTON_TOKEN + CANTON_USER_ID + CANTON_SYNCHRONIZER_ID + CANTON_SCAN_URL + CANTON_FACILITATOR_PARTY, CCD_FACILITATOR_PRIVATE_KEY + CCD_FACILITATOR_ADDRESS, EVM_PRIVATE_KEY, KEETA_MNEMONIC, NEAR_RELAYER_ACCOUNT_ID + NEAR_RELAYER_PRIVATE_KEY, SVM_PRIVATE_KEY, STELLAR_PRIVATE_KEY, TVM_PRIVATE_KEY, or HEDERA_ACCOUNT_ID + HEDERA_PRIVATE_KEY is required",
+    "❌ At least one of AVM_PRIVATE_KEY, APTOS_PRIVATE_KEY, CARDANO_MNEMONIC, CASPER_PRIVATE_KEY, CANTON_PARTICIPANT_URL + CANTON_TOKEN + CANTON_USER_ID + CANTON_SYNCHRONIZER_ID + CANTON_FACILITATOR_PARTY, CCD_FACILITATOR_PRIVATE_KEY + CCD_FACILITATOR_ADDRESS, EVM_PRIVATE_KEY, KEETA_MNEMONIC, NEAR_RELAYER_ACCOUNT_ID + NEAR_RELAYER_PRIVATE_KEY, SVM_PRIVATE_KEY, STELLAR_PRIVATE_KEY, TVM_PRIVATE_KEY, or HEDERA_ACCOUNT_ID + HEDERA_PRIVATE_KEY is required",
   );
   process.exit(1);
 }
@@ -282,14 +280,13 @@ if (casperPrivateKey) {
   );
 }
 
-// Register Canton scheme if a participant + Scan + facilitator party are provided.
+// Register Canton scheme if a participant + facilitator party are provided.
 if (cantonConfigured) {
   const cantonSigner = toFacilitatorCantonSigner({
     participantUrl: cantonParticipantUrl!,
     token: cantonToken!,
     userId: cantonUserId!,
     synchronizerId: cantonSynchronizerId!,
-    scanUrl: cantonScanUrl!,
     facilitatorParties: [cantonFacilitatorParty!],
   });
   facilitator.register(

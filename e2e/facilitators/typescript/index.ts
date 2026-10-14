@@ -212,9 +212,7 @@ const hasFacilitatorCredential = [
     process.env.FACILITATOR_CCD_ADDRESS,
   process.env.XRPL_NETWORK, // keyless XRPL facilitator
   process.env.BLOCKFROST_PROJECT_ID, // Cardano runs provider-only without a mnemonic
-  process.env.FACILITATOR_CANTON_PARTY &&
-    process.env.CANTON_PARTICIPANT_URL &&
-    process.env.CANTON_SCAN_URL,
+  process.env.FACILITATOR_CANTON_PARTY && process.env.CANTON_PARTICIPANT_URL,
 ].some(Boolean);
 
 if (!hasFacilitatorCredential) {
@@ -319,27 +317,21 @@ if (process.env.FACILITATOR_CASPER_PRIVATE_KEY) {
   );
 }
 
-// Initialize the Canton signer from a participant + Scan + facilitator party (optional)
+// Initialize the Canton signer from a participant + facilitator party (optional)
 let cantonSigner: ReturnType<typeof toFacilitatorCantonSigner> | undefined;
 if (
   process.env.FACILITATOR_CANTON_PARTY &&
   process.env.CANTON_PARTICIPANT_URL &&
   process.env.CANTON_TOKEN &&
   process.env.CANTON_USER_ID &&
-  process.env.CANTON_SYNCHRONIZER_ID &&
-  process.env.CANTON_SCAN_URL
+  process.env.CANTON_SYNCHRONIZER_ID
 ) {
   cantonSigner = toFacilitatorCantonSigner({
     participantUrl: process.env.CANTON_PARTICIPANT_URL,
     token: process.env.CANTON_TOKEN,
     userId: process.env.CANTON_USER_ID,
     synchronizerId: process.env.CANTON_SYNCHRONIZER_ID,
-    scanUrl: process.env.CANTON_SCAN_URL,
-    ...(process.env.CANTON_SCAN_TOKEN ? { scanToken: process.env.CANTON_SCAN_TOKEN } : {}),
     facilitatorParties: [process.env.FACILITATOR_CANTON_PARTY],
-    ...(process.env.CANTON_TOKEN_REGISTRIES
-      ? { tokenRegistries: JSON.parse(process.env.CANTON_TOKEN_REGISTRIES) }
-      : {}),
   });
   console.info(`Canton Facilitator party: ${cantonSigner.getAddresses()[0]}`);
 }
