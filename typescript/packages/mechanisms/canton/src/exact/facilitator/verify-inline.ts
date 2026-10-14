@@ -149,23 +149,9 @@ export async function verifyInlineTransfer(
     return fail("invalid_exact_canton_self_payment", payer);
   }
 
-  const extra = (requirements.extra ?? {}) as {
-    instrumentId?: { admin?: string; id?: string };
-    synchronizerId?: string;
-    feePayer?: string;
-    memo?: string;
-    assetTransferMethod?: string;
-  };
-
-  // Rule 9 — fee payer must be THIS facilitator (absent is a mismatch).
-  if (typeof extra.feePayer !== "string" || !facilitatorParties.has(extra.feePayer)) {
-    return fail("invalid_exact_canton_fee_payer_mismatch", payer);
-  }
-
-  // The scheme settles through the transfer factory only.
-  if (extra.assetTransferMethod !== CANTON_TRANSFER_METHOD) {
-    return fail("invalid_exact_canton_malformed_payload", payer);
-  }
+  const req = readRequirements(requirements, facilitatorParties);
+  if ("reason" in req) return fail(req.reason, payer);
+  const { extra, expectedAmount } = req;
 
   // Synchronizer pin: this facilitator's own configured domain is authoritative;
   // the requirement's `extra.synchronizerId` is the fallback, and when both are
@@ -173,24 +159,8 @@ export async function verifyInlineTransfer(
   const ownSynchronizer = config.synchronizerId || undefined;
   const expectedSynchronizer = ownSynchronizer ?? extra.synchronizerId;
 
-  // Rule 6 — the instrument must be pinned, both halves.
-  if (
-    typeof extra.instrumentId?.admin !== "string" ||
-    extra.instrumentId.admin.length === 0 ||
-    typeof extra.instrumentId.id !== "string" ||
-    extra.instrumentId.id.length === 0
-  ) {
-    return fail("invalid_exact_canton_instrument_id_mismatch", payer);
-  }
-
   // Rules 4/5/6 — amount/receiver/instrument/synchronizer/memo + single-root
   // exercise, proven from the signed bytes.
-  let expectedAmount: string;
-  try {
-    expectedAmount = wireAmountToLedgerDecimal(requirements.scheme, requirements.amount);
-  } catch {
-    return fail("invalid_exact_canton_amount_mismatch", payer);
-  }
 
   let declaredInputs: string[];
   let declaredExecuteBefore: number | undefined;
@@ -248,40 +218,24 @@ export async function verifyInlineTransfer(
   });
   if (!path.ok) return fail(path.reason, payer);
 
-  // Which merchants this facilitator relays for (it pays their traffic).
-  const policy = config.merchantPolicy ?? "open";
-  if (policy !== "open") {
-    const byProvider =
-      (policy === "provider" || policy === "provider-or-allowlist") &&
-      path.preapprovalProvider !== undefined &&
-      facilitatorParties.has(path.preapprovalProvider);
-    const byAllowlist =
-      (policy === "allowlist" || policy === "provider-or-allowlist") &&
-      (config.merchantAllowlist ?? []).includes(requirements.payTo);
-    if (!byProvider && !byAllowlist) {
-      return fail("invalid_exact_canton_merchant_not_registered", payer);
-    }
+  if (!merchantServed(config, requirements.payTo, path.preapprovalProvider, facilitatorParties)) {
+    return fail("invalid_exact_canton_merchant_not_registered", payer);
   }
 
   // Rule 10 — deadline (floor + ceiling).
   if (declaredExecuteBefore === undefined) {
     return fail("invalid_exact_canton_expired", payer);
   }
-  if (declaredExecuteBefore <= nowMs + EXECUTE_BEFORE_MARGIN_MS) {
-    return fail("invalid_exact_canton_expired", payer);
-  }
-  const maxAhead = config.maxExecuteBeforeSeconds;
-  if (maxAhead !== undefined && maxAhead > 0 && declaredExecuteBefore > nowMs + maxAhead * 1000) {
-    return fail("invalid_exact_canton_execute_before_too_far", payer);
-  }
+  const deadlineReason = executeBeforeReason(
+    declaredExecuteBefore,
+    nowMs,
+    config.maxExecuteBeforeSeconds,
+  );
+  if (deadlineReason) return fail(deadlineReason, payer);
 
   // Rule 3 — signature, last and fail-closed. Verify reads nothing else from
   // the network, so a payload error never surfaces as a ledger error.
-  let proof: {
-    verified: boolean;
-    preparedTxHashHex?: string;
-    publishedProtocolKeys?: number;
-  } = { verified: false };
+  let proof: Awaited<ReturnType<FacilitatorCantonSigner["verifySignature"]>>;
   try {
     proof = await signer.verifySignature({
       preparedTransactionBytes: decoded.preparedTransactionBytes,
@@ -318,4 +272,124 @@ export async function verifyInlineTransfer(
       ? { preparedTxHashHex: proof.preparedTxHashHex }
       : {}),
   };
+}
+
+/** The requirement fields verify reads, once validated. */
+interface CheckedRequirements {
+  extra: {
+    instrumentId: { admin: string; id: string };
+    synchronizerId?: string;
+    memo?: string;
+  };
+  /** `requirements.amount` as a ledger Decimal. */
+  expectedAmount: string;
+}
+
+/**
+ * Rules 9 and 6 and the transfer method: the requirements must name this
+ * facilitator as fee payer, the transfer-factory method, a full instrument id
+ * and an atomic amount.
+ *
+ * @param requirements - The merchant's payment requirements.
+ * @param facilitatorParties - This facilitator's relaying parties.
+ * @returns The validated fields, or the failure reason.
+ */
+function readRequirements(
+  requirements: PaymentRequirements,
+  facilitatorParties: ReadonlySet<string>,
+): CheckedRequirements | { reason: CantonErrorCode } {
+  const extra = (requirements.extra ?? {}) as {
+    instrumentId?: { admin?: string; id?: string };
+    synchronizerId?: string;
+    feePayer?: string;
+    memo?: string;
+    assetTransferMethod?: string;
+  };
+  // Rule 9 — fee payer must be THIS facilitator (absent is a mismatch).
+  if (typeof extra.feePayer !== "string" || !facilitatorParties.has(extra.feePayer)) {
+    return { reason: "invalid_exact_canton_fee_payer_mismatch" };
+  }
+  // The scheme settles through the transfer factory only.
+  if (extra.assetTransferMethod !== CANTON_TRANSFER_METHOD) {
+    return { reason: "invalid_exact_canton_malformed_payload" };
+  }
+  // Rule 6 — the instrument must be pinned, both halves.
+  const admin = extra.instrumentId?.admin;
+  const id = extra.instrumentId?.id;
+  if (
+    typeof admin !== "string" ||
+    admin.length === 0 ||
+    typeof id !== "string" ||
+    id.length === 0
+  ) {
+    return { reason: "invalid_exact_canton_instrument_id_mismatch" };
+  }
+  let expectedAmount: string;
+  try {
+    expectedAmount = wireAmountToLedgerDecimal(requirements.scheme, requirements.amount);
+  } catch {
+    return { reason: "invalid_exact_canton_amount_mismatch" };
+  }
+  return {
+    extra: {
+      instrumentId: { admin, id },
+      ...(extra.synchronizerId !== undefined ? { synchronizerId: extra.synchronizerId } : {}),
+      ...(typeof extra.memo === "string" ? { memo: extra.memo } : {}),
+    },
+    expectedAmount,
+  };
+}
+
+/**
+ * Whether this facilitator relays for the merchant (it pays the traffic): any
+ * merchant under the open policy, else one whose preapproval it provides or one
+ * on its allowlist, as the policy says.
+ *
+ * @param config - The facilitator's policy and allowlist.
+ * @param payTo - The merchant.
+ * @param provider - The provider of the merchant's preapproval, when proven.
+ * @param facilitatorParties - This facilitator's relaying parties.
+ * @returns Whether the merchant is served.
+ */
+function merchantServed(
+  config: CantonSchemeConfig,
+  payTo: string,
+  provider: string | undefined,
+  facilitatorParties: ReadonlySet<string>,
+): boolean {
+  const policy = config.merchantPolicy ?? "open";
+  if (policy === "open") return true;
+  const byProvider =
+    (policy === "provider" || policy === "provider-or-allowlist") &&
+    provider !== undefined &&
+    facilitatorParties.has(provider);
+  const byAllowlist =
+    (policy === "allowlist" || policy === "provider-or-allowlist") &&
+    (config.merchantAllowlist ?? []).includes(payTo);
+  return byProvider || byAllowlist;
+}
+
+/**
+ * Rule 10: the transfer's executeBefore must leave a safety margin and must not
+ * sit further ahead than the facilitator allows.
+ *
+ * @param executeBeforeMs - The signed executeBefore.
+ * @param nowMs - The verification time.
+ * @param maxAheadSeconds - The facilitator's ceiling, if any.
+ * @returns The failure reason, or undefined when the deadline is acceptable.
+ */
+function executeBeforeReason(
+  executeBeforeMs: number,
+  nowMs: number,
+  maxAheadSeconds: number | undefined,
+): CantonErrorCode | undefined {
+  if (executeBeforeMs <= nowMs + EXECUTE_BEFORE_MARGIN_MS) return "invalid_exact_canton_expired";
+  if (
+    maxAheadSeconds !== undefined &&
+    maxAheadSeconds > 0 &&
+    executeBeforeMs > nowMs + maxAheadSeconds * 1000
+  ) {
+    return "invalid_exact_canton_execute_before_too_far";
+  }
+  return undefined;
 }
