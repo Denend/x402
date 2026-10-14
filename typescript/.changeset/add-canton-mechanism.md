@@ -14,3 +14,9 @@ built on a bundled JSON Ledger API + Scan client and the official
 own `ClientCantonSigner` / `FacilitatorCantonSigner`. Canton Coin and CIP-56
 registry tokens (e.g. USDCx) share the exact wire shape and differ only by
 `extra.instrumentId.admin`.
+
+The facilitator proves the factory, the direct delivery and the payer's inputs
+from the signed transaction alone, supports the `authorization` and `upfront`
+flows, and answers `settlement_pending` when a relay's outcome is not yet known.
+`ensureTransferPreapproval` creates or renews the Canton Coin
+`TransferPreapproval` a merchant needs to be paid.
