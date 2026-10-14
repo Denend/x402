@@ -27,6 +27,12 @@ the direct delivery to the merchant and the payer's input holdings from the
 input contracts carried in the signed transaction, which the ledger
 authenticates when it executes; it reads no Scan or registry.
 
+The facilitator signer reads the payer's signing keys from the participant's
+JSON Ledger API JOSE route (Canton 3.5.10+). A Splice-distributed participant
+does not serve that route: pass `fetchPayerSigningKey` to
+`toFacilitatorCantonSigner` with a topology reader (or an admin-API read)
+instead. An empty answer refuses the payment.
+
 ```ts
 import { toClientCantonSigner, toFacilitatorCantonSigner } from "@x402/canton";
 
