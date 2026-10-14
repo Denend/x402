@@ -354,8 +354,9 @@ and [issued-token setup](https://xrpl.org/docs/tutorials/tokens/fungible-tokens/
 #### Canton DevNet
 
 The client and the facilitator use a Canton participant (JSON Ledger API) whose
-ledger user can act as the client party and as the facilitator party. The client
-and the payee (`SERVER_CANTON_ADDRESS`) are external parties with Ed25519 keys.
+ledger user can act as the client party and as the facilitator party, and, for
+`pnpm canton:setup`, as the payee (`SERVER_CANTON_ADDRESS`). The client and the
+payee are external parties with Ed25519 keys.
 
 1. Fund the client and the payee with DevNet Canton Coin from a DevNet tap (see
    [performing a CC tap](https://docs.canton.network/sdks-tools/sdks/wallet-sdk/guides/performing-a-cc-tap)).

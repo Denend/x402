@@ -19,7 +19,6 @@
       "roles": ["server"]
     },
     "FACILITATOR_CANTON_PARTY": { "required": true, "roles": ["facilitator"] },
-    "SERVER_CANTON_PRIVATE_KEY": { "required": false, "roles": ["server"] },
     "CANTON_SCAN_TOKEN": { "required": false, "roles": ["client"] }
   },
   "testnet": {

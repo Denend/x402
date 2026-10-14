@@ -328,7 +328,8 @@ On failure:
 
 10. **Deadline.** The transfer's `executeBefore` MUST be at least a small safety
     margin in the future at verification time. Reject with
-    `invalid_exact_canton_expired`.
+    `invalid_exact_canton_expired`. A facilitator MAY also cap how far ahead it
+    is; reject one beyond the cap with `invalid_exact_canton_execute_before_too_far`.
 
 11. **Self-payment guard.** The proven sender MUST NOT equal the facilitator /
     `feePayer` party. Reject with `invalid_exact_canton_self_payment`.
@@ -356,12 +357,19 @@ On failure:
     unpaid delivery, since the response is released only after settlement
     succeeds; the `upfront` flow removes it.
 
+## Merchant Policy
+
+A facilitator pays the traffic for every transfer it relays, so it MAY restrict
+the merchants it relays for (for example, to merchants whose preapproval it
+provides, or to an allowlist). A payment to any other merchant is rejected with
+`invalid_exact_canton_merchant_not_registered`.
+
 ## Replay & Duplicate Settlement
 
 The payer-signed transfer names specific input holdings. Once the transfer
 executes, those holdings are consumed; resubmitting the same payload references
 already-spent holdings, which the ledger rejects. The replay guard is therefore
-native and on-ledger — no off-chain deduplication store is required for safety.
+native and on-ledger — no offchain deduplication store is required for safety.
 A participant also deduplicates a resubmitted command id; a facilitator MUST
 NOT treat such a duplicate rejection as a failed payment, since the first
 submission may have committed.
@@ -417,7 +425,17 @@ The facilitator applies every verification rule, then:
      earlier) plus the synchronizer's ledger-time record-time tolerance.
    - Otherwise: `settlement_pending` again. A facilitator whose participant does
      not host the payer cannot prove absence and never turns a pending
-     settlement into a failure.
+     settlement into a failure. Neither does one whose relay was answered with a
+     duplicate-command rejection: an earlier relay of the same transaction was
+     accepted and may have committed before the range it searches.
+
+   A facilitator SHOULD also remember a committed settlement for the same
+   payload, so a retry after a lost response is answered with the same
+   `updateId` instead of relaying again.
+
+A failed settlement does not revoke the payer's signature: the signed transfer
+stays executable until its `executeBefore`, whoever holds it. Clients SHOULD keep
+`executeBefore` short, and facilitators MAY cap it (Rule 10).
 
 ## Error Reason Codes
 

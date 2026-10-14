@@ -94,8 +94,10 @@ transaction's hash as `transaction`, and remembers the submission in a
 instead of relaying it again. The transaction cannot commit after its
 `executeBefore` plus the synchronizer's ledger-time tolerance, so once that has
 passed a submission that is still not on the ledger is reported as failed. That
-absence is only provable on a participant that hosts the payer; elsewhere the
-answer stays `settlement_pending`.
+absence is only provable on a participant that hosts the payer, and never after
+the participant reported the relay as a duplicate of an earlier one; otherwise
+the answer stays `settlement_pending`. A committed settlement is remembered too,
+so a retry after a lost response gets the same `updateId`.
 
 The default store is in-memory, per process, with a 5-minute TTL. A facilitator
 running several replicas should pass a shared store as `pendingSettlementStore`,
