@@ -4,6 +4,7 @@ import tsParser from "@typescript-eslint/parser";
 import prettier from "eslint-plugin-prettier";
 import jsdoc from "eslint-plugin-jsdoc";
 import importPlugin from "eslint-plugin-import";
+import sonarjs from "eslint-plugin-sonarjs";
 
 export default [
   {
@@ -34,9 +35,13 @@ export default [
       prettier: prettier,
       jsdoc: jsdoc,
       import: importPlugin,
+      sonarjs,
     },
     rules: {
       ...ts.configs.recommended.rules,
+      complexity: ["error", 50],
+      "max-lines": ["error", { max: 2000 }],
+      "sonarjs/cognitive-complexity": ["error", 50],
       "import/first": "error",
       "prettier/prettier": "error",
       "@typescript-eslint/member-ordering": "error",
@@ -126,6 +131,18 @@ export default [
       "jsdoc/require-returns-description": "off",
       "jsdoc/require-hyphen-before-param-description": "off",
       "jsdoc/tag-lines": "off",
+    },
+  },
+  {
+    // The prepared-transaction decoder (the ported verify-before-sign core) is
+    // one audited unit: every field check sits next to the wire layout it reads.
+    // Its limits are set just above its current size and its largest function
+    // (the all-nodes foreign-party backstop) instead of splitting it.
+    files: ["src/prepared-transfer.ts"],
+    plugins: { sonarjs },
+    rules: {
+      "max-lines": ["error", { max: 3000 }],
+      "sonarjs/cognitive-complexity": ["error", 60],
     },
   },
 ];

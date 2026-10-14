@@ -11,7 +11,11 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
-import { verifyInlineTransfer } from "../../src/exact/facilitator/verify-inline.js";
+import {
+  classifyMismatch,
+  isInlineCarriage,
+  verifyInlineTransfer,
+} from "../../src/exact/facilitator/verify-inline.js";
 import { encodeInlinePaymentPayload } from "../../src/inline-payload.js";
 import { decodePrepared } from "../../src/prepared-transfer.js";
 import type { FacilitatorCantonSigner } from "../../src/signer.js";
@@ -348,5 +352,125 @@ describe("verifyInlineTransfer — scheme and network", () => {
     const r = await run(p as never, ccReqs());
     expect(r.ok).toBe(false);
     expect(r.reason).toBe("unsupported_scheme");
+  });
+});
+
+describe("verifyInlineTransfer — payload, deadline and merchant policy", () => {
+  const now = nowFor(CC_RAW);
+  const PROVIDER = decodePrepared(CC_RAW)
+    .inputContracts.find(
+      ic => ic.templateQualifiedName === "Splice.AmuletRules:TransferPreapproval",
+    )!
+    .signatories.find(p => p.startsWith("Cantex-validator-1::"))!;
+  const run = (
+    over: {
+      payload?: PaymentPayload;
+      reqs?: PaymentRequirements;
+      signer?: FacilitatorCantonSigner;
+    } = {},
+    config: Record<string, unknown> = {},
+    at = now,
+  ) =>
+    verifyInlineTransfer(
+      over.payload ?? inlinePayload(CC_RAW),
+      over.reqs ?? ccReqs(),
+      over.signer ?? stubSigner(),
+      { ...SERVED, ...config },
+      at,
+    );
+
+  it("refuses a payload without the signed transaction", async () => {
+    const p = { ...inlinePayload(CC_RAW), payload: {} };
+    expect((await run({ payload: p })).reason).toBe("invalid_exact_canton_missing_proof");
+  });
+
+  it("refuses bytes that are not a prepared transaction", async () => {
+    const p = {
+      ...inlinePayload(CC_RAW),
+      payload: {
+        ...encodeInlinePaymentPayload({
+          preparedTransactionBytes: Buffer.from("not a prepared transaction"),
+          preparedTxHash: "ab".repeat(32),
+          signatureB64: Buffer.alloc(64, 7).toString("base64"),
+        }),
+      },
+    };
+    expect((await run({ payload: p })).reason).toBe("invalid_exact_canton_malformed_payload");
+  });
+
+  it("refuses requirements without a full instrument id", async () => {
+    const reqs = ccReqs({
+      extra: { ...ccReqs().extra, instrumentId: { admin: CC.instrumentId.admin } },
+    });
+    expect((await run({ reqs })).reason).toBe("invalid_exact_canton_instrument_id_mismatch");
+  });
+
+  it("refuses an amount that is not an atomic integer", async () => {
+    expect((await run({ reqs: ccReqs({ amount: "0.5" }) })).reason).toBe(
+      "invalid_exact_canton_amount_mismatch",
+    );
+  });
+
+  it("refuses a memo the transfer does not carry", async () => {
+    const reqs = ccReqs({ extra: { ...ccReqs().extra, memo: "invoice-1" } });
+    expect((await run({ reqs })).reason).toBe("invalid_exact_canton_memo_mismatch");
+  });
+
+  it("refuses an executeBefore further ahead than the facilitator allows", async () => {
+    expect((await run({}, { maxExecuteBeforeSeconds: 10 })).reason).toBe(
+      "invalid_exact_canton_execute_before_too_far",
+    );
+  });
+
+  it("refuses a transfer about to expire", async () => {
+    const deadline = Number(decodePrepared(CC_RAW).maxLedgerEffectiveTime! / 1000n);
+    expect((await run({}, {}, deadline - 1_000)).reason).toBe("invalid_exact_canton_expired");
+  });
+
+  it("refuses when the signature check itself fails", async () => {
+    const signer = stubSigner({
+      verifySignature: async () => {
+        throw new Error("topology unavailable");
+      },
+    });
+    expect((await run({ signer })).reason).toBe("invalid_exact_canton_signature_invalid");
+  });
+
+  it("provider policy: relays for merchants whose preapproval this facilitator provides", async () => {
+    const asProvider = stubSigner({ getAddresses: () => [FAC, PROVIDER] });
+    expect((await run({ signer: asProvider }, { merchantPolicy: "provider" })).ok).toBe(true);
+    expect((await run({}, { merchantPolicy: "provider" })).reason).toBe(
+      "invalid_exact_canton_merchant_not_registered",
+    );
+  });
+
+  it("allowlist policy: relays only for listed merchants", async () => {
+    expect(
+      (await run({}, { merchantPolicy: "allowlist", merchantAllowlist: [CC.receiver] })).ok,
+    ).toBe(true);
+    expect((await run({}, { merchantPolicy: "allowlist", merchantAllowlist: [] })).reason).toBe(
+      "invalid_exact_canton_merchant_not_registered",
+    );
+  });
+});
+
+describe("classifyMismatch and isInlineCarriage", () => {
+  it("maps validator messages onto the scheme's codes", () => {
+    const cases: Array<[string, string]> = [
+      ["amount differs", "invalid_exact_canton_amount_mismatch"],
+      ["receiver differs", "invalid_exact_canton_merchant_mismatch"],
+      ["instrument differs", "invalid_exact_canton_instrument_id_mismatch"],
+      ["memo differs", "invalid_exact_canton_memo_mismatch"],
+      ["no input holding", "invalid_exact_canton_insufficient_inputs"],
+      ["executeBefore already in the past", "invalid_exact_canton_expired"],
+      ["something else", "invalid_exact_canton_malformed_payload"],
+    ];
+    for (const [message, code] of cases) expect(classifyMismatch(message)).toBe(code);
+  });
+
+  it("recognizes the inline carriage", () => {
+    expect(isInlineCarriage({ preparedTransaction: "x" })).toBe(true);
+    expect(isInlineCarriage({})).toBe(false);
+    expect(isInlineCarriage(null)).toBe(false);
   });
 });
