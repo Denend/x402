@@ -25,7 +25,8 @@ export class ExactCantonScheme implements SchemeNetworkServer {
   readonly scheme = "exact";
   readonly defaultAssetTransferMethod = CANTON_TRANSFER_METHOD;
   readonly paymentFlows = {
-    [CANTON_TRANSFER_METHOD]: { supported: ["authorization"], default: "authorization" },
+    // Settle verifies the payload in full, so it can run before the handler.
+    [CANTON_TRANSFER_METHOD]: { supported: ["authorization", "upfront"], default: "authorization" },
   } as const satisfies Record<string, PaymentFlowConfig>;
   // Injected by the facilitator into the 402 `extra` (see enhancePaymentRequirements),
   // so they are excluded from the requirements-vs-accepted match.

@@ -3,6 +3,7 @@
  * asset/instrumentId consistency guard.
  */
 import { describe, it, expect } from "vitest";
+import { resolvePaymentFlow } from "@x402/core/server";
 import type { PaymentRequirements, SupportedKind } from "@x402/core/types";
 import {
   ExactCantonScheme,
@@ -33,10 +34,19 @@ const supported = (): SupportedKind => ({
 describe("server scheme", () => {
   const s = new ExactCantonScheme();
 
-  it("declares the transfer-factory authorization flow", () => {
+  it("declares the transfer-factory authorization and upfront flows", () => {
     expect(s.scheme).toBe("exact");
     expect(s.defaultAssetTransferMethod).toBe("transfer-factory");
     expect(s.paymentFlows["transfer-factory"].default).toBe("authorization");
+    expect(s.paymentFlows["transfer-factory"].supported).toEqual(["authorization", "upfront"]);
+  });
+
+  it("resolves an upfront route through core's payment-flow table", () => {
+    const flow = resolvePaymentFlow(s, {
+      ...baseReqs(),
+      extra: { paymentFlow: "upfront" },
+    } as never);
+    expect(flow).toEqual({ assetTransferMethod: "transfer-factory", paymentFlow: "upfront" });
   });
 
   it("getAssetDecimals returns 10 for Canton Coin", () => {

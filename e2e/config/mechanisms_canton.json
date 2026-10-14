@@ -36,6 +36,12 @@
       "scheme": "exact",
       "sdks": ["typescript"],
       "price": { "amount": "100000000", "asset": "CC" }
+    },
+    "/exact/canton/upfront": {
+      "scheme": "exact",
+      "sdks": ["typescript"],
+      "paymentFlow": "upfront",
+      "price": { "amount": "100000000", "asset": "CC" }
     }
   }
 }
