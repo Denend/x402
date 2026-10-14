@@ -51,15 +51,15 @@ function clientSigner(): ClientCantonSigner {
   };
 }
 
-function facilitatorSigner(executes: string[], kinds: string[] = []): FacilitatorCantonSigner {
+function facilitatorSigner(executes: string[]): FacilitatorCantonSigner {
   return {
     getAddresses: () => [FAC],
     verifySignature: async () => ({ verified: true, preparedTxHashHex: "cd".repeat(32) }),
-    executeSubmission: async args => {
+    executeSubmission: async () => {
       executes.push("executed");
-      kinds.push(args.transferKind);
-      return { updateId: "1220-settled", transferred: true };
+      return { updateId: "1220-settled" };
     },
+    lookupSubmission: async () => ({ status: "absent" }),
   };
 }
 
@@ -125,8 +125,7 @@ describe("exact/canton integration (CC, stubbed signers)", () => {
 
     // 3. Facilitator verifies then settles.
     const executes: string[] = [];
-    const kinds: string[] = [];
-    const facilitator = new FacilitatorScheme(facilitatorSigner(executes, kinds), {
+    const facilitator = new FacilitatorScheme(facilitatorSigner(executes), {
       networks: [NETWORK],
       synchronizerId:
         "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
@@ -140,20 +139,18 @@ describe("exact/canton integration (CC, stubbed signers)", () => {
     expect(settle.success).toBe(true);
     expect(settle.transaction).toBe("1220-settled");
     expect(executes).toHaveLength(1);
-    // Settle executes with the transfer kind verify established.
-    expect(kinds).toEqual(["amulet"]);
   });
 
-  // Fund-safety: an execute that COMMITTED but whose outcome could not be read is
-  // not a rejection. Reporting it as the retryable execute-failed reason would
-  // invite the payer to pay again, so settle must surface the non-retryable
-  // ledger-read error instead.
-  it("settle maps an unknown execute outcome to the non-retryable ledger error", async () => {
+  // Fund-safety: an execute that may have COMMITTED but whose outcome could not
+  // be read is not a rejection. Reporting it as the retryable execute-failed
+  // reason would invite the payer to pay again, so settle answers the
+  // non-terminal settlement_pending and reconciles on retry.
+  it("settle maps an unknown execute outcome to settlement_pending", async () => {
     const { reqs, payload } = await buildFlow();
     const signer: FacilitatorCantonSigner = {
       ...facilitatorSigner([]),
       executeSubmission: async () => {
-        throw new SubmissionOutcomeUnknownError(new Error("completion read timed out"));
+        throw new SubmissionOutcomeUnknownError(new Error("completion read timed out"), 0);
       },
     };
     const facilitator = new FacilitatorScheme(signer, {
@@ -163,7 +160,8 @@ describe("exact/canton integration (CC, stubbed signers)", () => {
 
     const settle = await facilitator.settle(payload as never, reqs);
     expect(settle.success).toBe(false);
-    expect(settle.errorReason).toBe("unexpected_canton_ledger_error");
+    expect(settle.errorReason).toBe("settlement_pending");
+    expect(settle.transaction).not.toBe("");
   });
 
   it("settle maps a definite execute rejection to the retryable execute-failed error", async () => {

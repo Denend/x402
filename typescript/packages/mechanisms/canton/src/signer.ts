@@ -9,15 +9,14 @@
  *
  * Mirrors the SVM mechanism's `ClientSvmSigner` / `FacilitatorSvmSigner` split.
  */
+import type { SubmissionLookup } from "./ledger/transfer-factory.js";
+
+export type { SubmissionLookup };
 
 /** Result of relaying the payer-signed transaction (ExecuteSubmission). */
 export interface ExecuteResult {
   /** Canton updateId of the committed transaction. */
   updateId: string;
-  /** Whether funds actually moved to the merchant (committed-zero-funds → false). */
-  transferred: boolean;
-  /** True when the funds-moved read could not be confirmed either way. */
-  confirmInconclusive?: boolean;
 }
 
 /**
@@ -87,17 +86,32 @@ export interface FacilitatorCantonSigner {
     preparedTxHashHex?: string;
     publishedProtocolKeys?: number;
   }>;
-  /** Relay the payer-signed transaction (ExecuteSubmission). Settle only. */
+  /**
+   * Relay the payer-signed transaction (ExecuteSubmission) and return its
+   * committed updateId. Settle only. Throws `SubmissionOutcomeUnknownError`
+   * (carrying the ledger offset read before submitting) when the transaction
+   * may have been submitted but its outcome could not be read; any other throw
+   * means it was definitely not committed.
+   */
   executeSubmission(args: {
     preparedTransactionBytes: Buffer;
     signatureB64: string;
     payer: string;
     hashingSchemeVersion: string;
-    /** The transfer kind verify decoded from the signed transaction. Selects
-     *  the funds-moved signal: `amulet` uses the archived-Amulet check,
-     *  `registry` the CIP-56 result-tag signal. */
-    transferKind: "amulet" | "registry";
+    /** Submission id to execute under; settle derives it from the transaction hash. */
+    submissionId: string;
   }): Promise<ExecuteResult>;
+  /**
+   * Find the outcome of a submission `executeSubmission` could not read: by its
+   * completion, else by the signed command id among the payer's transactions
+   * recorded after `beginOffset`.
+   */
+  lookupSubmission(args: {
+    payer: string;
+    submissionId: string;
+    commandId: string;
+    beginOffset: number;
+  }): Promise<SubmissionLookup>;
 }
 
 /** Trust anchors + registry config, supplied out-of-band (never relay-derived). */

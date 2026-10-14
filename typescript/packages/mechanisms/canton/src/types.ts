@@ -93,4 +93,5 @@ export type CantonErrorCode =
   | "unexpected_canton_ledger_error"
   // Generic x402 codes (specs/x402-specification-v2.md).
   | "invalid_network"
+  | "settlement_pending"
   | "unsupported_scheme";

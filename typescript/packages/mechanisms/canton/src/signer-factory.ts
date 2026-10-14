@@ -315,15 +315,13 @@ export function toFacilitatorCantonSigner(
             },
           ],
         },
-        submissionId: `x402-inline-${randomUUID()}`,
-        // Selects the registry vs Amulet funds-moved signal in confirmTransferred.
-        transferKind: args.transferKind,
+        submissionId: args.submissionId,
       });
-      return {
-        updateId: result.updateId,
-        transferred: result.transferred,
-        confirmInconclusive: result.confirmInconclusive,
-      };
+      return { updateId: result.updateId };
+    },
+
+    lookupSubmission(args) {
+      return tfSvc.lookup(args);
     },
   };
 }

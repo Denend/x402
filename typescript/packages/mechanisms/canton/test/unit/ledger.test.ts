@@ -5,8 +5,8 @@
  *   transport errors, 5xx, 408 and 409 are an unknown outcome.
  * - completion parsing: settled needs an OK status AND an updateId; rejected
  *   needs a numeric non-zero code; anything else is unreadable.
- * - funds-moved: a pending AmuletTransferInstruction / TransferOffer is not a
- *   delivery; the registry path reads the standard's result tag.
+ * - reconciliation: a submission is found by its completion, else by its signed
+ *   command id among the payer's transactions; an unreadable ledger is unknown.
  * - Scan never receives the ledger token.
  */
 import { describe, it, expect } from "vitest";
@@ -23,30 +23,24 @@ import { toClientCantonSigner } from "../../src/signer-factory.js";
 const PAYER = "payer::1220" + "aa".repeat(32);
 const PKG = "0f".repeat(32);
 
-type Events = Awaited<ReturnType<TransferFactoryDeps["client"]["getTransactionById"]>>["events"];
-
-function service(over: Partial<TransferFactoryDeps["client"]> = {}, events: Events = []) {
+function service(over: Partial<TransferFactoryDeps["client"]> = {}) {
   const client: TransferFactoryDeps["client"] = {
     getLedgerEnd: async () => ({ offset: 1 }),
     interactiveSubmissionExecute: async () => ({ updateId: "1220-u", completionOffset: 2 }),
     pollCompletionUpdateId: async () => "1220-u",
-    getTransactionById: async () => ({ updateId: "1220-u", offset: 2, events }),
+    findCompletion: async () => ({ kind: "absent" }),
+    findCommandUpdateId: async () => undefined,
     ...over,
   };
-  return new TransferFactoryService({
-    client,
-    userId: "u",
-    confirmRetry: { attempts: 1, delayMs: 0 },
-  });
+  return new TransferFactoryService({ client, userId: "u" });
 }
 
-const execInput = (transferKind: "amulet" | "registry" = "amulet") => ({
+const execInput = () => ({
   payer: PAYER,
   preparedTransaction: "",
   hashingSchemeVersion: "HASHING_SCHEME_VERSION_V2" as const,
   partySignatures: { signatures: [] },
   submissionId: "s",
-  transferKind,
 });
 
 describe("execute failure classification", () => {
@@ -82,60 +76,150 @@ describe("execute failure classification", () => {
   }
 });
 
-describe("funds-moved confirmation", () => {
-  const archivedAmulet = {
-    ArchivedEvent: { contractId: "c1", templateId: `${PKG}:Splice.Amulet:Amulet` },
-  };
-  const created = (templateId: string) => ({
-    CreatedEvent: { contractId: "c2", templateId } as never,
+describe("execute outcome", () => {
+  it("returns the updateId /execute answers with", async () => {
+    expect(await service().execute(execInput())).toEqual({ updateId: "1220-u" });
   });
 
-  it("Amulet: archived input and nothing pending → transferred", async () => {
-    const r = await service({}, [archivedAmulet]).execute(execInput());
-    expect(r.transferred).toBe(true);
+  it("polls the completion when /execute answers without an updateId", async () => {
+    const svc = service({
+      interactiveSubmissionExecute: async () => ({ updateId: "", completionOffset: 0 }),
+      pollCompletionUpdateId: async () => "1220-polled",
+    });
+    expect(await svc.execute(execInput())).toEqual({ updateId: "1220-polled" });
   });
 
-  it("Amulet: a pending AmuletTransferInstruction → not transferred", async () => {
-    const r = await service({}, [
-      archivedAmulet,
-      created(`${PKG}:Splice.AmuletTransferInstruction:AmuletTransferInstruction`),
-    ]).execute(execInput());
-    expect(r.transferred).toBe(false);
-  });
-
-  it("Amulet: a TransferOffer → not transferred", async () => {
-    const r = await service({}, [
-      archivedAmulet,
-      created(`${PKG}:Splice.Wallet.TransferOffer:TransferOffer`),
-    ]).execute(execInput());
-    expect(r.transferred).toBe(false);
-  });
-
-  it("registry: reads the full effects and trusts the result tag", async () => {
-    const asked: Array<boolean | undefined> = [];
-    const tagged = (tag: string): Events => [
-      {
-        ExercisedEvent: {
-          contractId: "f",
-          templateId: "t",
-          choice: "TransferFactory_Transfer",
-          exerciseResult: { output: { tag } },
-        },
+  it("a rejected completion is a definite refusal", async () => {
+    const rejected = new CantonError("rejected", "SUBMISSION_FAILED");
+    const svc = service({
+      interactiveSubmissionExecute: async () => ({ updateId: "", completionOffset: 0 }),
+      pollCompletionUpdateId: async () => {
+        throw rejected;
       },
-    ];
-    const run = async (tag: string) =>
-      service(
-        {
-          getTransactionById: async args => {
-            asked.push(args.fullEffects);
-            return { updateId: "1220-u", offset: 2, events: tagged(tag) };
-          },
-        },
-        [],
-      ).execute(execInput("registry"));
-    expect((await run("TransferInstructionResult_Completed")).transferred).toBe(true);
-    expect((await run("TransferInstructionResult_Pending")).transferred).toBe(false);
-    expect(asked).toEqual([true, true]);
+    });
+    await expect(svc.execute(execInput())).rejects.toBe(rejected);
+  });
+
+  it("a duplicate-command completion is an unknown outcome, not a refusal", async () => {
+    const svc = service({
+      interactiveSubmissionExecute: async () => ({ updateId: "", completionOffset: 0 }),
+      pollCompletionUpdateId: async () => {
+        throw new CantonError("outcome not readable: duplicate", "INVALID_RESPONSE");
+      },
+    });
+    await expect(svc.execute(execInput())).rejects.toBeInstanceOf(SubmissionOutcomeUnknownError);
+  });
+
+  it("an unknown outcome carries the offset read before submitting", async () => {
+    const svc = service({
+      getLedgerEnd: async () => ({ offset: 42 }),
+      interactiveSubmissionExecute: async () => {
+        throw new CantonError("aborted", "TIMEOUT");
+      },
+    });
+    const err = await svc.execute(execInput()).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SubmissionOutcomeUnknownError);
+    expect((err as SubmissionOutcomeUnknownError).beginOffset).toBe(42);
+  });
+});
+
+describe("submission lookup", () => {
+  const input = { payer: PAYER, submissionId: "s", commandId: "cmd", beginOffset: 5 };
+
+  it("a settled completion → committed", async () => {
+    const svc = service({ findCompletion: async () => ({ kind: "settled", updateId: "1220-c" }) });
+    expect(await svc.lookup(input)).toEqual({ status: "committed", updateId: "1220-c" });
+  });
+
+  it("a rejected completion → rejected", async () => {
+    const svc = service({ findCompletion: async () => ({ kind: "rejected", message: "no" }) });
+    expect(await svc.lookup(input)).toEqual({ status: "rejected" });
+  });
+
+  it("an unreadable completion → unknown", async () => {
+    const svc = service({ findCompletion: async () => ({ kind: "malformed", message: "?" }) });
+    expect(await svc.lookup(input)).toEqual({ status: "unknown" });
+  });
+
+  it("no completion, but the command id is on the ledger → committed", async () => {
+    const asked: unknown[] = [];
+    const svc = service({
+      findCommandUpdateId: async (...a) => {
+        asked.push(a);
+        return "1220-by-command";
+      },
+    });
+    expect(await svc.lookup(input)).toEqual({ status: "committed", updateId: "1220-by-command" });
+    expect(asked).toEqual([[PAYER, "cmd", 5]]);
+  });
+
+  it("a duplicate-command completion still searches by command id", async () => {
+    const svc = service({
+      findCompletion: async () => ({ kind: "duplicate", message: "already exists" }),
+      findCommandUpdateId: async () => "1220-first-relay",
+    });
+    expect(await svc.lookup(input)).toEqual({ status: "committed", updateId: "1220-first-relay" });
+  });
+
+  it("nowhere on the ledger → absent", async () => {
+    expect(await service().lookup(input)).toEqual({ status: "absent" });
+  });
+
+  it("a failed ledger read → unknown, never absent", async () => {
+    const svc = service({
+      findCommandUpdateId: async () => {
+        throw new CantonError("down", "HTTP_ERROR", 503);
+      },
+    });
+    expect(await svc.lookup(input)).toEqual({ status: "unknown" });
+  });
+});
+
+describe("findCommandUpdateId", () => {
+  function clientWith(end: number, updates: unknown, status = 200) {
+    const bodies: unknown[] = [];
+    const client = new CantonClient({
+      participantUrl: "http://p.invalid",
+      token: "t",
+      fetch: (async (url: string, init?: RequestInit) => {
+        if (url.endsWith("/v2/state/ledger-end")) {
+          return new Response(JSON.stringify({ offset: end }), { status: 200 });
+        }
+        bodies.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify(updates), { status });
+      }) as typeof fetch,
+    });
+    return { client, bodies };
+  }
+  const tx = (commandId: string, updateId: string) => ({
+    update: { Transaction: { value: { commandId, updateId } } },
+  });
+
+  it("reads the closed range up to the ledger end and matches the command id", async () => {
+    const { client, bodies } = clientWith(30, [tx("other", "1220-a"), tx("cmd", "1220-b")]);
+    expect(await client.findCommandUpdateId(PAYER, "cmd", 10)).toBe("1220-b");
+    expect(bodies[0]).toMatchObject({ beginExclusive: 10, endInclusive: 30 });
+  });
+
+  it("undefined when the command id is not in the range", async () => {
+    const { client } = clientWith(30, [tx("other", "1220-a")]);
+    expect(await client.findCommandUpdateId(PAYER, "cmd", 10)).toBeUndefined();
+  });
+
+  it("undefined without a read when nothing was recorded since the offset", async () => {
+    const { client, bodies } = clientWith(10, []);
+    expect(await client.findCommandUpdateId(PAYER, "cmd", 10)).toBeUndefined();
+    expect(bodies).toHaveLength(0);
+  });
+
+  it("throws on a failed read", async () => {
+    const { client } = clientWith(30, { code: "X" }, 500);
+    await expect(client.findCommandUpdateId(PAYER, "cmd", 10)).rejects.toBeInstanceOf(CantonError);
+  });
+
+  it("throws on a response that is not a list", async () => {
+    const { client } = clientWith(30, { not: "a list" });
+    await expect(client.findCommandUpdateId(PAYER, "cmd", 10)).rejects.toBeInstanceOf(CantonError);
   });
 });
 
@@ -194,6 +278,16 @@ describe("completion parsing", () => {
       0,
     );
     expect(r.kind).toBe("malformed");
+  });
+
+  it("ALREADY_EXISTS (an accepted duplicate) → duplicate, not rejected", async () => {
+    const r = await clientWith({ status: { code: 6, message: "dup" } }).findCompletion(
+      "u",
+      PAYER,
+      "s",
+      0,
+    );
+    expect(r).toEqual({ kind: "duplicate", message: "dup" });
   });
 
   it("numeric non-zero code → rejected", async () => {

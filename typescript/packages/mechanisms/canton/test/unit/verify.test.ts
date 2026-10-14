@@ -55,7 +55,8 @@ function stubSigner(over: Partial<FacilitatorCantonSigner> = {}): FacilitatorCan
   return {
     getAddresses: () => [FAC],
     verifySignature: async () => ({ verified: true, preparedTxHashHex: "cd".repeat(32) }),
-    executeSubmission: async () => ({ updateId: "1220-x", transferred: true }),
+    executeSubmission: async () => ({ updateId: "1220-x" }),
+    lookupSubmission: async () => ({ status: "absent" }),
     ...over,
   };
 }
@@ -94,7 +95,7 @@ describe("verifyInlineTransfer — Canton Coin", () => {
     expect(r.payer).toBe(CC.sender);
     expect(r.transferKind).toBe("amulet");
     expect(r.commandId).toBeTruthy();
-    expect(r.maxLedgerTimeMs).toBeGreaterThan(now);
+    expect(r.commitDeadlineMs).toBeGreaterThan(now);
   });
 
   it("fails a tampered amount", async () => {

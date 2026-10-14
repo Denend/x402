@@ -136,6 +136,9 @@ export interface HoldingV1Row {
 }
 
 /** A Canton ledger error carrying the HTTP status when the failure was a response. */
+/** gRPC status of a command the participant already accepted (deduplication). */
+const GRPC_ALREADY_EXISTS = 6;
+
 export class CantonError extends Error {
   /**
    * Construct a Canton ledger error.
@@ -245,107 +248,57 @@ export class CantonClient {
   }
 
   /**
-   * POST `/v2/updates/transaction-by-id` (or `update-by-id` for full effects) —
-   * look up a transaction's events scoped to the requesting parties. The
-   * funds-moved confirmation reads the payer's projection here.
+   * POST `/v2/updates` over a closed offset range — the updateId of the
+   * transaction that `party` submitted with `commandId`, if one was recorded
+   * after `beginExclusive`. The range ends at the current ledger end, so the
+   * read is complete: undefined means no such transaction up to that end.
+   * A transaction's command id is visible to its submitting party only, which
+   * is the payer this facilitator executed for.
    *
-   * @param args - updateId, requestingParties, and whether to request the full
-   *   ledger-effects tree (needed for a registry token's exercise result).
-   * @returns The transaction's events.
+   * @param party - The submitting party (the payer).
+   * @param commandId - The command id signed in the prepared transaction.
+   * @param beginExclusive - Offset read before the submission.
+   * @returns The committed updateId, or undefined when there is none.
    */
-  async getTransactionById(args: {
-    fullEffects?: boolean;
-    updateId: string;
-    requestingParties: string[];
-  }): Promise<{
-    updateId: string;
-    offset: number;
-    events: Array<{
-      CreatedEvent?: CreatedEvent;
-      ExercisedEvent?: {
-        contractId: string;
-        templateId: string;
-        choice: string;
-        exerciseResult?: unknown;
-      };
-      ArchivedEvent?: { contractId: string; templateId: string };
-    }>;
-  }> {
-    const response = await this.post<{
-      transaction?: {
-        updateId?: string;
-        offset?: number;
-        events?: Array<{
-          CreatedEvent?: CreatedEvent;
-          ExercisedEvent?: {
-            contractId: string;
-            templateId: string;
-            choice: string;
-            exerciseResult?: unknown;
-          };
-          ArchivedEvent?: { contractId: string; templateId: string };
-        }>;
-      };
-    }>(
-      args.fullEffects ? "/v2/updates/update-by-id" : "/v2/updates/transaction-by-id",
-      args.fullEffects
-        ? {
-            // The same party sees different events per request shape. update-by-id
-            // + wildcard filter yields the full ledger-effects tree including the
-            // TransferFactory_Transfer WITH its exerciseResult — where a registry
-            // token's funds-moved proof lives.
-            updateId: args.updateId,
-            updateFormat: {
-              includeTransactions: {
-                eventFormat: {
-                  filtersByParty: Object.fromEntries(
-                    args.requestingParties.map(p => [
-                      p,
-                      {
-                        cumulative: [
-                          {
-                            identifierFilter: {
-                              WildcardFilter: {
-                                value: { includeCreatedEventBlob: false },
-                              },
-                            },
-                          },
-                        ],
-                      },
-                    ]),
-                  ),
-                  verbose: false,
-                },
-                transactionShape: "TRANSACTION_SHAPE_LEDGER_EFFECTS",
+  async findCommandUpdateId(
+    party: string,
+    commandId: string,
+    beginExclusive: number,
+  ): Promise<string | undefined> {
+    const { offset: endInclusive } = await this.getLedgerEnd();
+    if (endInclusive <= beginExclusive) return undefined;
+    const updates = await this.post<
+      Array<{ update?: { Transaction?: { value?: { updateId?: string; commandId?: string } } } }>
+    >("/v2/updates", {
+      beginExclusive,
+      endInclusive,
+      updateFormat: {
+        includeTransactions: {
+          eventFormat: {
+            filtersByParty: {
+              [party]: {
+                cumulative: [
+                  {
+                    identifierFilter: {
+                      WildcardFilter: { value: { includeCreatedEventBlob: false } },
+                    },
+                  },
+                ],
               },
             },
-          }
-        : {
-            updateId: args.updateId,
-            requestingParties: args.requestingParties,
-            transactionShape: "TRANSACTION_SHAPE_LEDGER_EFFECTS",
+            verbose: false,
           },
-    );
-    // The two endpoints wrap the transaction differently:
-    //   transaction-by-id -> { transaction: { events } }
-    //   update-by-id      -> { update: { Transaction: { value: { events } } } }
-    const wrapped = (
-      response as unknown as {
-        update?: {
-          Transaction?: {
-            value?: { updateId?: string; offset?: number; events?: unknown[] };
-          };
-        };
-      }
-    ).update?.Transaction?.value;
-    const tx = (args.fullEffects ? wrapped : response.transaction) ?? {};
-    return {
-      updateId: tx.updateId ?? args.updateId,
-      offset: tx.offset ?? 0,
-      events: (tx.events ?? []) as Awaited<
-        ReturnType<CantonClient["getTransactionById"]>
-      >["events"],
-    };
+          transactionShape: "TRANSACTION_SHAPE_ACS_DELTA",
+        },
+      },
+    });
+    if (!Array.isArray(updates)) {
+      throw new CantonError("/v2/updates returned no update list", "INVALID_RESPONSE");
+    }
+    const tx = updates
+      .map(u => u.update?.Transaction?.value)
+      .find(t => t?.commandId === commandId && typeof t.updateId === "string" && t.updateId);
+    return tx?.updateId;
   }
 
   /**
@@ -368,6 +321,7 @@ export class CantonClient {
   ): Promise<
     | { kind: "settled"; updateId: string }
     | { kind: "rejected"; message: string }
+    | { kind: "duplicate"; message: string }
     | { kind: "malformed"; message: string }
     | { kind: "absent" }
   > {
@@ -378,7 +332,12 @@ export class CantonClient {
       // we cannot read is not proof that nothing moved.
       const code: unknown = v.status?.code ?? 0;
       if (typeof code === "number" && Number.isInteger(code) && code !== 0) {
-        return { kind: "rejected", message: v.status?.message || `status ${code}` };
+        const message = v.status?.message || `status ${code}`;
+        // ALREADY_EXISTS: the participant already accepted this command (an
+        // earlier relay of the same signed transaction). That one may well have
+        // committed, so this is no proof that nothing moved.
+        if (code === GRPC_ALREADY_EXISTS) return { kind: "duplicate", message };
+        return { kind: "rejected", message };
       }
       // Success needs the OK code AND the committed updateId.
       if (code === 0 && typeof v.updateId === "string" && v.updateId) {
@@ -418,8 +377,8 @@ export class CantonClient {
           "SUBMISSION_FAILED",
         );
       }
-      if (found.kind === "malformed") {
-        throw new CantonError(`unreadable completion: ${found.message}`, "INVALID_RESPONSE");
+      if (found.kind === "malformed" || found.kind === "duplicate") {
+        throw new CantonError(`outcome not readable: ${found.message}`, "INVALID_RESPONSE");
       }
       await new Promise(r => setTimeout(r, 600));
     }

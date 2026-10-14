@@ -41,8 +41,10 @@ export interface InlineVerifyResult {
   transferKind?: TransferKind;
   /** The signed command id, used by settle to find the committed transaction. */
   commandId?: string;
-  /** The last instant (ms) the signed transaction allows as its ledger time. */
-  maxLedgerTimeMs?: number;
+  /** The latest time (ms) the signed transaction may still commit at, before
+   *  the synchronizer's ledger-time tolerance: the earliest of its
+   *  `executeBefore`, `max_ledger_effective_time` and `max_record_time`. */
+  commitDeadlineMs?: number;
 }
 
 const fail = (reason: CantonErrorCode, payer = ""): InlineVerifyResult => ({
@@ -303,9 +305,12 @@ export async function verifyInlineTransfer(
     hashingSchemeVersion: decoded.hashingSchemeVersion,
     transferKind: path.kind,
     ...(pt.commandId !== undefined ? { commandId: pt.commandId } : {}),
-    ...(pt.maxLedgerEffectiveTime !== undefined
-      ? { maxLedgerTimeMs: Number(pt.maxLedgerEffectiveTime / 1000n) }
-      : {}),
+    commitDeadlineMs: Math.min(
+      declaredExecuteBefore,
+      ...[pt.maxLedgerEffectiveTime, pt.maxRecordTime]
+        .filter((t): t is bigint => t !== undefined)
+        .map(t => Number(t / 1000n)),
+    ),
     ...(proof.publishedProtocolKeys !== undefined
       ? { publishedProtocolKeys: proof.publishedProtocolKeys }
       : {}),
