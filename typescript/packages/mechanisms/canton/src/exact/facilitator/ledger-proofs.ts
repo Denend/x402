@@ -16,7 +16,6 @@
 import {
   entryByDeclOrder,
   leafOf,
-  matchPreapprovalProvider,
   PREAPPROVAL_TEMPLATE,
   recordEntries,
   type DecodedInputContract,
@@ -33,6 +32,8 @@ const REGISTRY_FACTORY_TEMPLATE =
 const REGISTRY_TRANSFER_RULE_TEMPLATE = "Utility.Registry.V0.Rule.Transfer:TransferRule";
 const REGISTRY_DIRECT_TRANSFER_CHOICE = "TransferRule_DirectTransfer";
 const AMULET_HOLDING_TEMPLATE = "Splice.Amulet:Amulet";
+/** The choice the Canton Coin transfer factory delivers through a preapproval with. */
+const PREAPPROVAL_SEND_CHOICE = "TransferPreapproval_SendV2";
 const REGISTRY_HOLDING_TEMPLATE = "Utility.Registry.Holding.V0.Holding:Holding";
 
 /** Ledger Decimal precision shared by Canton Coin and Registry Utility tokens. */
@@ -74,6 +75,12 @@ export function proveSettlementPath(
   pt: DecodedPrepared,
   expect: SettlementPathExpectation,
 ): SettlementPathResult {
+  // One entry per contract: a second entry under the same id could disagree
+  // with the first about what the contract holds.
+  const ids = pt.inputContracts.map(ic => ic.contractId);
+  if (new Set(ids).size !== ids.length) {
+    return { ok: false, reason: "invalid_exact_canton_malformed_payload" };
+  }
   const factory = pt.inputContracts.find(ic => ic.contractId === expect.rootContractId);
   const kind = factory ? factoryKind(factory, expect) : undefined;
   if (!factory || !kind) {
@@ -123,9 +130,15 @@ function factoryKind(
 }
 
 /**
- * Canton Coin delivery: the transfer must consume the merchant's own
- * `TransferPreapproval` (see matchPreapprovalProvider for the binding rules),
- * and that preapproval must be inside its validity window now.
+ * Canton Coin delivery: the transfer must deliver through the merchant's own
+ * `TransferPreapproval`, which must be inside its validity window now:
+ *
+ *   1. exactly one input contract is a TransferPreapproval (two would let a
+ *      decoy stand next to the real one);
+ *   2. it names `payTo` as receiver and the instrument admin as DSO;
+ *   3. its signatories are exactly {DSO, receiver, provider} — two parties when
+ *      the merchant is its own provider, three otherwise;
+ *   4. the transaction exercises `TransferPreapproval_SendV2` on that contract.
  *
  * @param pt - The decoded, payer-signed prepared transaction.
  * @param expect - The facilitator's expectations for this payment.
@@ -139,12 +152,24 @@ function proveAmuletPreapproval(
     ok: false as const,
     reason: "invalid_exact_canton_preapproval_missing" as const,
   };
-  const provider = matchPreapprovalProvider(pt, expect.payTo, expect.instrumentId.admin);
-  if (provider === undefined) return missing;
-  const preapproval = pt.inputContracts.find(
+  const candidates = pt.inputContracts.filter(
     ic => ic.templateQualifiedName === PREAPPROVAL_TEMPLATE,
   );
-  const fields = readRecord(preapproval?.argument);
+  const preapproval = candidates.length === 1 ? candidates[0] : undefined;
+  if (!preapproval?.contractId) return missing;
+  const fields = readRecord(preapproval.argument);
+  const dso = partyAt(fields, 0, "dso");
+  const receiver = partyAt(fields, 1, "receiver");
+  const provider = partyAt(fields, 2, "provider");
+  if (dso !== expect.instrumentId.admin || receiver !== expect.payTo || !provider) return missing;
+  if (!sameParties(preapproval.signatories, [dso, receiver, provider])) return missing;
+  const delivered = pt.exercises.some(
+    ex =>
+      ex.choiceId === PREAPPROVAL_SEND_CHOICE &&
+      ex.templateQualifiedName === PREAPPROVAL_TEMPLATE &&
+      ex.contractId === preapproval.contractId,
+  );
+  if (!delivered) return missing;
   const validFromMs = timestampMsAt(fields, 3, "validFrom");
   const expiresAtMs = timestampMsAt(fields, 5, "expiresAt");
   if (validFromMs === undefined || expiresAtMs === undefined) return missing;

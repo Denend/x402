@@ -164,7 +164,10 @@ export async function ensureTransferPreapproval(
   });
 
   const hashB64 = await recomputeHash(prepared.preparedTransaction);
-  const fingerprint = config.fingerprint ?? config.party.split("::")[1] ?? "";
+  const fingerprint = config.fingerprint ?? config.party.split("::")[1];
+  if (!fingerprint) {
+    throw new Error(`${config.party} is not a party id (<hint>::<fingerprint>); pass fingerprint`);
+  }
   const signature = signPreparedTransactionHash(
     hashB64,
     createPrivateKey(config.privateKeyPem),

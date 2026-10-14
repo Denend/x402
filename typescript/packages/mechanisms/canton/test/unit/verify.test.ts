@@ -85,6 +85,10 @@ function ccReqs(over: Partial<PaymentRequirements> = {}): PaymentRequirements {
 
 const SERVED = { networks: [NETWORK] };
 
+/** The refusal reason, or undefined when verify passed. */
+const reasonOf = (r: Awaited<ReturnType<typeof verifyInlineTransfer>>) =>
+  r.ok ? undefined : r.reason;
+
 describe("verifyInlineTransfer — Canton Coin", () => {
   it("passes on the signed transaction alone", async () => {
     const now = nowFor(CC_RAW);
@@ -97,6 +101,7 @@ describe("verifyInlineTransfer — Canton Coin", () => {
     );
     expect(r.ok).toBe(true);
     expect(r.payer).toBe(CC.sender);
+    if (!r.ok) throw new Error(r.reason);
     expect(r.transferKind).toBe("amulet");
     expect(r.commandId).toBeTruthy();
     expect(r.commitDeadlineMs).toBeGreaterThan(now);
@@ -112,7 +117,7 @@ describe("verifyInlineTransfer — Canton Coin", () => {
       now,
     );
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe("invalid_exact_canton_amount_mismatch");
+    expect(reasonOf(r)).toBe("invalid_exact_canton_amount_mismatch");
   });
 
   it("fails a tampered receiver", async () => {
@@ -125,7 +130,7 @@ describe("verifyInlineTransfer — Canton Coin", () => {
       now,
     );
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe("invalid_exact_canton_merchant_mismatch");
+    expect(reasonOf(r)).toBe("invalid_exact_canton_merchant_mismatch");
   });
 
   it("fails a tampered instrument admin (bytes carry the DSO)", async () => {
@@ -143,7 +148,7 @@ describe("verifyInlineTransfer — Canton Coin", () => {
       now,
     );
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe("invalid_exact_canton_instrument_id_mismatch");
+    expect(reasonOf(r)).toBe("invalid_exact_canton_instrument_id_mismatch");
   });
 
   it("fails a fee-payer mismatch (feePayer not this facilitator)", async () => {
@@ -156,7 +161,7 @@ describe("verifyInlineTransfer — Canton Coin", () => {
       now,
     );
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe("invalid_exact_canton_fee_payer_mismatch");
+    expect(reasonOf(r)).toBe("invalid_exact_canton_fee_payer_mismatch");
   });
 
   it("fails a self-payment (payer is the facilitator)", async () => {
@@ -170,7 +175,7 @@ describe("verifyInlineTransfer — Canton Coin", () => {
       now,
     );
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe("invalid_exact_canton_self_payment");
+    expect(reasonOf(r)).toBe("invalid_exact_canton_self_payment");
   });
 
   it("rejects a bad signature", async () => {
@@ -183,7 +188,7 @@ describe("verifyInlineTransfer — Canton Coin", () => {
       now,
     );
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe("invalid_exact_canton_signature_invalid");
+    expect(reasonOf(r)).toBe("invalid_exact_canton_signature_invalid");
   });
 });
 
@@ -225,7 +230,7 @@ describe("verifyInlineTransfer — USDCx (CIP-56 registry)", () => {
       config,
       NOW_MS,
     );
-    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error(r.reason);
     expect(r.transferKind).toBe("registry");
   });
 
@@ -281,7 +286,7 @@ describe("verifyInlineTransfer — requirements gates", () => {
     const reqs = ccReqs();
     const r = await run({ ...reqs, extra: { ...reqs.extra, assetTransferMethod: "allocation" } });
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe("invalid_exact_canton_malformed_payload");
+    expect(reasonOf(r)).toBe("invalid_exact_canton_malformed_payload");
   });
 
   it("fails a missing assetTransferMethod", async () => {
@@ -290,14 +295,14 @@ describe("verifyInlineTransfer — requirements gates", () => {
     delete extra.assetTransferMethod;
     const r = await run({ ...reqs, extra });
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe("invalid_exact_canton_malformed_payload");
+    expect(reasonOf(r)).toBe("invalid_exact_canton_malformed_payload");
   });
 
   it("pins to the facilitator's own synchronizer when extra omits it", async () => {
     expect((await run(ccReqs(), { synchronizerId: SIGNED_SYNC })).ok).toBe(true);
     const r = await run(ccReqs(), { synchronizerId: OTHER_SYNC });
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe("invalid_exact_canton_malformed_payload");
+    expect(reasonOf(r)).toBe("invalid_exact_canton_malformed_payload");
   });
 
   it("fails when extra.synchronizerId differs from the signed domain", async () => {
@@ -307,7 +312,7 @@ describe("verifyInlineTransfer — requirements gates", () => {
       { synchronizerId: SIGNED_SYNC },
     );
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe("invalid_exact_canton_malformed_payload");
+    expect(reasonOf(r)).toBe("invalid_exact_canton_malformed_payload");
   });
 
   it("passes when facilitator and extra both name the signed domain", async () => {
@@ -333,13 +338,13 @@ describe("verifyInlineTransfer — scheme and network", () => {
     const p = { ...inlinePayload(CC_RAW), accepted: { scheme: "exact", network: "canton:devnet" } };
     const r = await run(p as never, ccReqs());
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe("invalid_network");
+    expect(reasonOf(r)).toBe("invalid_network");
   });
 
   it("rejects a network this facilitator does not serve", async () => {
     const r = await run(inlinePayload(CC_RAW), ccReqs(), { networks: ["canton:devnet"] });
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe("invalid_network");
+    expect(reasonOf(r)).toBe("invalid_network");
   });
 
   it("passes on a served network", async () => {
@@ -351,7 +356,7 @@ describe("verifyInlineTransfer — scheme and network", () => {
     const p = { ...inlinePayload(CC_RAW), accepted: { scheme: "upto", network: NETWORK } };
     const r = await run(p as never, ccReqs());
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe("unsupported_scheme");
+    expect(reasonOf(r)).toBe("unsupported_scheme");
   });
 });
 
@@ -381,7 +386,7 @@ describe("verifyInlineTransfer — payload, deadline and merchant policy", () =>
 
   it("refuses a payload without the signed transaction", async () => {
     const p = { ...inlinePayload(CC_RAW), payload: {} };
-    expect((await run({ payload: p })).reason).toBe("invalid_exact_canton_missing_proof");
+    expect(reasonOf(await run({ payload: p }))).toBe("invalid_exact_canton_missing_proof");
   });
 
   it("refuses bytes that are not a prepared transaction", async () => {
@@ -395,51 +400,51 @@ describe("verifyInlineTransfer — payload, deadline and merchant policy", () =>
         }),
       },
     };
-    expect((await run({ payload: p })).reason).toBe("invalid_exact_canton_malformed_payload");
+    expect(reasonOf(await run({ payload: p }))).toBe("invalid_exact_canton_malformed_payload");
   });
 
   it("refuses requirements without a full instrument id", async () => {
     const reqs = ccReqs({
       extra: { ...ccReqs().extra, instrumentId: { admin: CC.instrumentId.admin } },
     });
-    expect((await run({ reqs })).reason).toBe("invalid_exact_canton_instrument_id_mismatch");
+    expect(reasonOf(await run({ reqs }))).toBe("invalid_exact_canton_instrument_id_mismatch");
   });
 
   it("refuses an amount that is not an atomic integer", async () => {
-    expect((await run({ reqs: ccReqs({ amount: "0.5" }) })).reason).toBe(
+    expect(reasonOf(await run({ reqs: ccReqs({ amount: "0.5" }) }))).toBe(
       "invalid_exact_canton_amount_mismatch",
     );
   });
 
   it("refuses a memo the transfer does not carry", async () => {
     const reqs = ccReqs({ extra: { ...ccReqs().extra, memo: "invoice-1" } });
-    expect((await run({ reqs })).reason).toBe("invalid_exact_canton_memo_mismatch");
+    expect(reasonOf(await run({ reqs }))).toBe("invalid_exact_canton_memo_mismatch");
   });
 
   it("refuses an executeBefore further ahead than the facilitator allows", async () => {
-    expect((await run({}, { maxExecuteBeforeSeconds: 10 })).reason).toBe(
+    expect(reasonOf(await run({}, { maxExecuteBeforeSeconds: 10 }))).toBe(
       "invalid_exact_canton_execute_before_too_far",
     );
   });
 
   it("refuses a transfer about to expire", async () => {
     const deadline = Number(decodePrepared(CC_RAW).maxLedgerEffectiveTime! / 1000n);
-    expect((await run({}, {}, deadline - 1_000)).reason).toBe("invalid_exact_canton_expired");
+    expect(reasonOf(await run({}, {}, deadline - 1_000))).toBe("invalid_exact_canton_expired");
   });
 
-  it("refuses when the signature check itself fails", async () => {
+  it("a failed key read is a ledger error, not an invalid signature", async () => {
     const signer = stubSigner({
       verifySignature: async () => {
         throw new Error("topology unavailable");
       },
     });
-    expect((await run({ signer })).reason).toBe("invalid_exact_canton_signature_invalid");
+    expect(reasonOf(await run({ signer }))).toBe("unexpected_canton_ledger_error");
   });
 
   it("provider policy: relays for merchants whose preapproval this facilitator provides", async () => {
     const asProvider = stubSigner({ getAddresses: () => [FAC, PROVIDER] });
     expect((await run({ signer: asProvider }, { merchantPolicy: "provider" })).ok).toBe(true);
-    expect((await run({}, { merchantPolicy: "provider" })).reason).toBe(
+    expect(reasonOf(await run({}, { merchantPolicy: "provider" }))).toBe(
       "invalid_exact_canton_merchant_not_registered",
     );
   });
@@ -448,7 +453,7 @@ describe("verifyInlineTransfer — payload, deadline and merchant policy", () =>
     expect(
       (await run({}, { merchantPolicy: "allowlist", merchantAllowlist: [CC.receiver] })).ok,
     ).toBe(true);
-    expect((await run({}, { merchantPolicy: "allowlist", merchantAllowlist: [] })).reason).toBe(
+    expect(reasonOf(await run({}, { merchantPolicy: "allowlist", merchantAllowlist: [] }))).toBe(
       "invalid_exact_canton_merchant_not_registered",
     );
   });

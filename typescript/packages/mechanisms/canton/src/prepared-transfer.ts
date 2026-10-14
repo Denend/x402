@@ -2150,7 +2150,7 @@ function extractTransferPreapproval(
  * @param expectedReceiver
  * @param instrumentAdmin
  */
-export function matchPreapprovalProvider(
+function matchPreapprovalProvider(
   decoded: DecodedPrepared,
   expectedReceiver: string,
   instrumentAdmin: string,

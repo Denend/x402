@@ -30,7 +30,10 @@ import { CANTON_CAIP_FAMILY } from "../../constants.js";
 import type { CantonErrorCode } from "../../types.js";
 import type { FacilitatorCantonSigner, CantonSchemeConfig } from "../../signer.js";
 import { verifyInlineTransfer, type InlineVerifyResult } from "./verify-inline.js";
-import { SubmissionOutcomeUnknownError } from "../../ledger/transfer-factory.js";
+import {
+  isFacilitatorSideRefusal,
+  SubmissionOutcomeUnknownError,
+} from "../../ledger/transfer-factory.js";
 
 /** Default allowance between a transaction's ledger-time deadline and the last
  *  record time it can commit at: the synchronizer's ledger-time/record-time
@@ -39,6 +42,7 @@ const DEFAULT_LEDGER_TIME_TOLERANCE_MS = 120_000;
 
 /** What settle remembers about a relay whose outcome it could not read. */
 interface PendingSubmission {
+  kind: "pending";
   submissionId: string;
   commandId: string;
   /** Ledger offset read before submitting; the outcome, if any, lies after it. */
@@ -47,7 +51,20 @@ interface PendingSubmission {
   finalAfterMs: number;
   /** When the payload was verified, so a retry re-proves it as it stood then. */
   verifiedAtMs: number;
+  /** The participant reported the command as already accepted: an earlier
+   *  relay may have committed before `beginOffset`, so absence proves nothing. */
+  duplicate: boolean;
 }
+
+/** What settle remembers about a relay that committed, so a retry after a lost
+ *  response gets the same answer instead of relaying again. */
+interface SettledSubmission {
+  kind: "settled";
+  updateId: string;
+  verifiedAtMs: number;
+}
+
+type StoredSubmission = PendingSubmission | SettledSubmission;
 
 /** Options for the Canton facilitator scheme. */
 export interface CantonFacilitatorOptions extends CantonSchemeConfig {
@@ -132,7 +149,7 @@ export class ExactCantonScheme implements SchemeNetworkFacilitator {
     }
     return {
       isValid: false,
-      invalidReason: r.reason ?? "invalid_exact_canton_malformed_payload",
+      invalidReason: r.reason,
       ...(r.payer ? { payer: r.payer } : {}),
     };
   }
@@ -150,24 +167,18 @@ export class ExactCantonScheme implements SchemeNetworkFacilitator {
     payload: PaymentPayload,
     requirements: PaymentRequirements,
   ): Promise<SettleResponse> {
-    const pending = await this.pendingFor(payload, requirements);
-    if (pending) return this.reconcile(pending.key, pending.record, pending.payer, requirements);
-
     const network = requirements.network;
-    const v = await verifyInlineTransfer(payload, requirements, this.signer, this.options);
-    if (
-      !v.ok ||
-      !v.preparedTransactionBytes ||
-      !v.preparedTxHashHex ||
-      !v.commandId ||
-      v.commitDeadlineMs === undefined
-    ) {
-      return this.settleFailure(
-        v.reason ?? "invalid_exact_canton_malformed_payload",
-        network,
-        v.payer,
-      );
+    const earlier = await this.earlierRelay(payload, requirements);
+    if (earlier?.status === "unverifiable") {
+      return this.pendingResponse(earlier.key, earlier.payer, network);
     }
+    if (earlier?.record.kind === "settled") {
+      return { success: true, payer: earlier.payer, transaction: earlier.record.updateId, network };
+    }
+    if (earlier) return this.reconcile(earlier.key, earlier.record, earlier.payer, requirements);
+
+    const v = await verifyInlineTransfer(payload, requirements, this.signer, this.options);
+    if (!v.ok) return this.settleFailure(v.reason, network, v.payer);
     const verifiedAtMs = Date.now();
     // Derived from the signed transaction, so every relay of it uses one id.
     const submissionId = `x402-settle-${v.preparedTxHashHex}`;
@@ -175,51 +186,65 @@ export class ExactCantonScheme implements SchemeNetworkFacilitator {
     try {
       const exec = await this.signer.executeSubmission({
         preparedTransactionBytes: v.preparedTransactionBytes,
-        signatureB64: v.signatureB64 ?? "",
+        signatureB64: v.signatureB64,
         payer: v.payer,
-        hashingSchemeVersion: v.hashingSchemeVersion ?? "HASHING_SCHEME_VERSION_V2",
+        hashingSchemeVersion: v.hashingSchemeVersion,
         submissionId,
+      });
+      await this.remember(v.preparedTxHashHex, {
+        kind: "settled",
+        updateId: exec.updateId,
+        verifiedAtMs,
       });
       return { success: true, payer: v.payer, transaction: exec.updateId, network };
     } catch (err) {
       if (!(err instanceof SubmissionOutcomeUnknownError)) {
-        return this.settleFailure("invalid_exact_canton_execute_failed", network, v.payer);
+        // Refused before submission for a reason of the facilitator's own (its
+        // credentials, a missing route, a rate limit) is not the payment's fault.
+        const reason = isFacilitatorSideRefusal(err)
+          ? "unexpected_canton_ledger_error"
+          : "invalid_exact_canton_execute_failed";
+        return this.settleFailure(reason, network, v.payer);
       }
-      return this.recordPending(
-        v.preparedTxHashHex,
-        {
-          submissionId,
-          commandId: v.commandId,
-          beginOffset: err.beginOffset,
-          finalAfterMs: v.commitDeadlineMs + this.toleranceMs(),
-          verifiedAtMs,
-        },
-        v.payer,
-        network,
-      );
+      await this.remember(v.preparedTxHashHex, {
+        kind: "pending",
+        submissionId,
+        commandId: v.commandId,
+        beginOffset: err.beginOffset,
+        finalAfterMs: v.commitDeadlineMs + this.toleranceMs(),
+        verifiedAtMs,
+        duplicate: err.duplicate,
+      });
+      return this.pendingResponse(v.preparedTxHashHex, v.payer, network);
     }
   }
 
   /**
-   * The pending relay this payload refers to, if any. The store is keyed by the
-   * prepared-transaction hash; the payload's own claimed hash only finds the
-   * entry. It counts only when the payload re-verifies, as of the original
-   * verification, against these requirements and to that same hash, so a
-   * different payload claiming the hash cannot take over the original's outcome.
+   * The earlier relay of this payload, if settle remembers one. The store is
+   * keyed by the prepared-transaction hash; the payload's own claimed hash only
+   * finds the entry. It counts only when the payload re-verifies, as of the
+   * original verification, against these requirements and to that same hash, so
+   * a different payload claiming the hash cannot take over the original's
+   * outcome. If the re-verification cannot be completed (a ledger read failed),
+   * the earlier relay's outcome stays open.
    *
    * @param payload - The x402 payment payload.
    * @param requirements - The merchant's payment requirements.
-   * @returns The store key, the pending record and the proven payer, or undefined.
+   * @returns The earlier relay with the proven payer, an unverifiable one, or undefined.
    */
-  private async pendingFor(
+  private async earlierRelay(
     payload: PaymentPayload,
     requirements: PaymentRequirements,
-  ): Promise<{ key: string; record: PendingSubmission; payer: string } | undefined> {
+  ): Promise<
+    | { status: "found"; key: string; record: StoredSubmission; payer: string }
+    | { status: "unverifiable"; key: string; payer: string }
+    | undefined
+  > {
     const claimed = (payload.payload as { preparedTxHash?: unknown } | undefined)?.preparedTxHash;
     if (typeof claimed !== "string" || claimed.length === 0) return undefined;
     const key = claimed.toLowerCase();
     const stored = await this.pendingStore.get(key);
-    const record = stored ? parsePending(stored) : undefined;
+    const record = stored ? parseStored(stored) : undefined;
     if (!record) return undefined;
     const v: InlineVerifyResult = await verifyInlineTransfer(
       payload,
@@ -228,8 +253,12 @@ export class ExactCantonScheme implements SchemeNetworkFacilitator {
       this.options,
       record.verifiedAtMs,
     );
-    if (!v.ok || v.preparedTxHashHex !== key) return undefined;
-    return { key, record, payer: v.payer };
+    if (v.ok && v.preparedTxHashHex === key)
+      return { status: "found", key, record, payer: v.payer };
+    if (!v.ok && v.reason === "unexpected_canton_ledger_error") {
+      return { status: "unverifiable", key, payer: v.payer };
+    }
+    return undefined;
   }
 
   /**
@@ -261,41 +290,51 @@ export class ExactCantonScheme implements SchemeNetworkFacilitator {
       beginOffset: record.beginOffset,
     });
     if (found.status === "committed") {
+      await this.remember(key, {
+        kind: "settled",
+        updateId: found.updateId,
+        verifiedAtMs: record.verifiedAtMs,
+      });
       return { success: true, payer, transaction: found.updateId, network };
     }
     if (found.status === "rejected") {
       return this.settleFailure("invalid_exact_canton_execute_failed", network, payer);
     }
-    if (found.status === "absent" && checkedAtMs > record.finalAfterMs) {
+    if (found.status === "absent" && !record.duplicate && checkedAtMs > record.finalAfterMs) {
       // Past the deadline and nowhere on the ledger: it can never commit, so
       // the payer may safely pay again.
       return this.settleFailure("invalid_exact_canton_execute_failed", network, payer);
     }
-    return this.recordPending(key, record, payer, network);
+    await this.remember(key, record);
+    return this.pendingResponse(key, payer, network);
   }
 
   /**
-   * Remember a relay with an unknown outcome and answer `settlement_pending`.
-   * If it cannot be remembered, a retry would relay blindly, so the answer is a
-   * final, non-retryable error instead.
+   * Remember a relay's outcome. Best effort: without the entry a retry relays
+   * the same transaction again, which the participant deduplicates (reported
+   * as a duplicate, which settle never turns into a failure) or refuses for
+   * spent inputs.
    *
    * @param key - The prepared-transaction hash.
-   * @param record - What to remember about the relay.
-   * @param payer - The proven payer.
-   * @param network - The requirements' network.
-   * @returns The pending response, or the final error.
+   * @param record - What to remember.
    */
-  private async recordPending(
-    key: string,
-    record: PendingSubmission,
-    payer: string,
-    network: Network,
-  ): Promise<SettleResponse> {
+  private async remember(key: string, record: StoredSubmission): Promise<void> {
     try {
       await this.pendingStore.set(key, JSON.stringify(record));
     } catch {
-      return this.settleFailure("unexpected_canton_ledger_error", network, payer);
+      // See above: losing the entry costs a second relay, never a wrong answer.
     }
+  }
+
+  /**
+   * The `settlement_pending` response.
+   *
+   * @param key - The prepared-transaction hash.
+   * @param payer - The proven payer.
+   * @param network - The requirements' network.
+   * @returns The pending response.
+   */
+  private pendingResponse(key: string, payer: string, network: Network): SettleResponse {
     return {
       success: false,
       errorReason: "settlement_pending",
@@ -337,24 +376,30 @@ export class ExactCantonScheme implements SchemeNetworkFacilitator {
 }
 
 /**
- * Parse a stored pending record, or undefined when it is not one.
+ * Parse a stored entry, or undefined when it is not one.
  *
  * @param stored - The stored JSON.
- * @returns The record.
+ * @returns The pending or settled record.
  */
-function parsePending(stored: string): PendingSubmission | undefined {
+function parseStored(stored: string): StoredSubmission | undefined {
+  let r: { [K in keyof PendingSubmission | keyof SettledSubmission]?: unknown };
   try {
-    const r = JSON.parse(stored) as Partial<PendingSubmission>;
-    const numbers = [r.beginOffset, r.finalAfterMs, r.verifiedAtMs];
-    if (
-      typeof r.submissionId !== "string" ||
-      typeof r.commandId !== "string" ||
-      !numbers.every(n => typeof n === "number" && Number.isFinite(n))
-    ) {
-      return undefined;
-    }
-    return r as PendingSubmission;
+    r = JSON.parse(stored) as typeof r;
   } catch {
     return undefined;
   }
+  const isNumber = (n: unknown) => typeof n === "number" && Number.isFinite(n);
+  if (r.kind === "settled" && typeof r.updateId === "string" && isNumber(r.verifiedAtMs)) {
+    return r as unknown as SettledSubmission;
+  }
+  if (
+    r.kind === "pending" &&
+    typeof r.submissionId === "string" &&
+    typeof r.commandId === "string" &&
+    typeof r.duplicate === "boolean" &&
+    [r.beginOffset, r.finalAfterMs, r.verifiedAtMs].every(isNumber)
+  ) {
+    return r as unknown as PendingSubmission;
+  }
+  return undefined;
 }

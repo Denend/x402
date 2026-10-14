@@ -135,10 +135,10 @@ export interface HoldingV1Row {
   amount: string;
 }
 
-/** A Canton ledger error carrying the HTTP status when the failure was a response. */
 /** gRPC status of a command the participant already accepted (deduplication). */
 const GRPC_ALREADY_EXISTS = 6;
 
+/** A Canton ledger error carrying the HTTP status when the failure was a response. */
 export class CantonError extends Error {
   /**
    * Construct a Canton ledger error.
@@ -392,8 +392,11 @@ export class CantonClient {
           "SUBMISSION_FAILED",
         );
       }
-      if (found.kind === "malformed" || found.kind === "duplicate") {
-        throw new CantonError(`outcome not readable: ${found.message}`, "INVALID_RESPONSE");
+      if (found.kind === "duplicate") {
+        throw new CantonError(`duplicate submission: ${found.message}`, "DUPLICATE_SUBMISSION");
+      }
+      if (found.kind === "malformed") {
+        throw new CantonError(`unreadable completion: ${found.message}`, "INVALID_RESPONSE");
       }
       await new Promise(r => setTimeout(r, 600));
     }

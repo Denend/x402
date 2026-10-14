@@ -1,7 +1,7 @@
 /**
- * Inline transfer-factory VERIFY — the money-critical validation, ported from the
- * FTP facilitator's proven implementation and adapted to the `@x402/core` wire
- * types + the injected `FacilitatorCantonSigner`. Never submits; never mutates.
+ * Inline transfer-factory VERIFY — the money-critical validation, on the
+ * `@x402/core` wire types and the injected `FacilitatorCantonSigner`. Never
+ * submits; never mutates.
  *
  * The payer signs a relay-prepared `TransferFactory_Transfer` and carries it
  * inline. This proves, from the SIGNED bytes alone: the proven payer (act_as),
@@ -28,26 +28,36 @@ import { proveSettlementPath, type TransferKind } from "./ledger-proofs.js";
 
 const EXECUTE_BEFORE_MARGIN_MS = 5_000;
 
-export interface InlineVerifyResult {
-  ok: boolean;
-  reason?: CantonErrorCode;
+/** A payload verify proved, with what settle needs to relay and reconcile it. */
+export interface InlineVerifySuccess {
+  ok: true;
   payer: string;
-  preparedTransactionBytes?: Buffer;
-  signatureB64?: string;
-  hashingSchemeVersion?: "HASHING_SCHEME_VERSION_V1" | "HASHING_SCHEME_VERSION_V2";
-  preparedTxHashHex?: string;
+  preparedTransactionBytes: Buffer;
+  signatureB64: string;
+  hashingSchemeVersion: "HASHING_SCHEME_VERSION_V1" | "HASHING_SCHEME_VERSION_V2";
+  /** The hash recomputed from the signed bytes, which the signature covers. */
+  preparedTxHashHex: string;
   publishedProtocolKeys?: number;
   /** The instrument family verify proved the transfer settles through. */
-  transferKind?: TransferKind;
+  transferKind: TransferKind;
   /** The signed command id, used by settle to find the committed transaction. */
-  commandId?: string;
+  commandId: string;
   /** The latest time (ms) the signed transaction may still commit at, before
    *  the synchronizer's ledger-time tolerance: the earliest of its
    *  `executeBefore`, `max_ledger_effective_time` and `max_record_time`. */
-  commitDeadlineMs?: number;
+  commitDeadlineMs: number;
 }
 
-const fail = (reason: CantonErrorCode, payer = ""): InlineVerifyResult => ({
+/** A payload verify refused, with the reason and the payer when it was proven. */
+export interface InlineVerifyFailure {
+  ok: false;
+  reason: CantonErrorCode;
+  payer: string;
+}
+
+export type InlineVerifyResult = InlineVerifySuccess | InlineVerifyFailure;
+
+const fail = (reason: CantonErrorCode, payer = ""): InlineVerifyFailure => ({
   ok: false,
   reason,
   payer,
@@ -245,10 +255,15 @@ export async function verifyInlineTransfer(
       hashingSchemeVersion: decoded.hashingSchemeVersion,
     });
   } catch {
-    proof = { verified: false };
+    // The payer's key could not be read: that says nothing about the payload.
+    return fail("unexpected_canton_ledger_error", payer);
   }
-  if (!proof.verified) {
+  if (!proof.verified || proof.preparedTxHashHex === undefined) {
     return fail("invalid_exact_canton_signature_invalid", payer);
+  }
+  // The proto requires a command id; settle reconciles by it.
+  if (pt.commandId === undefined) {
+    return fail("invalid_exact_canton_malformed_payload", payer);
   }
 
   return {
@@ -258,7 +273,7 @@ export async function verifyInlineTransfer(
     signatureB64: decoded.signatureB64,
     hashingSchemeVersion: decoded.hashingSchemeVersion,
     transferKind: path.kind,
-    ...(pt.commandId !== undefined ? { commandId: pt.commandId } : {}),
+    commandId: pt.commandId,
     commitDeadlineMs: Math.min(
       declaredExecuteBefore,
       ...[pt.maxLedgerEffectiveTime, pt.maxRecordTime]
@@ -268,9 +283,7 @@ export async function verifyInlineTransfer(
     ...(proof.publishedProtocolKeys !== undefined
       ? { publishedProtocolKeys: proof.publishedProtocolKeys }
       : {}),
-    ...(proof.preparedTxHashHex !== undefined
-      ? { preparedTxHashHex: proof.preparedTxHashHex }
-      : {}),
+    preparedTxHashHex: proof.preparedTxHashHex,
   };
 }
 

@@ -101,6 +101,14 @@ describe("proveSettlementPath — Canton Coin", () => {
     });
   });
 
+  it("refuses two input contracts under one contract id", () => {
+    const dup = { ...pt, inputContracts: [...pt.inputContracts, pt.inputContracts[0]!] };
+    expect(proveSettlementPath(dup, base)).toEqual({
+      ok: false,
+      reason: "invalid_exact_canton_malformed_payload",
+    });
+  });
+
   it("refuses a root exercise on a contract that is not an input contract", () => {
     const r = proveSettlementPath(pt, { ...base, rootContractId: "00" + "ab".repeat(33) });
     expect(r).toEqual({ ok: false, reason: "invalid_exact_canton_malformed_payload" });
@@ -167,6 +175,61 @@ describe("proveSettlementPath — Canton Coin", () => {
   it("refuses a malformed amount", () => {
     const r = proveSettlementPath(pt, { ...base, amount: "0.01000000001" });
     expect(r).toEqual({ ok: false, reason: "invalid_exact_canton_insufficient_inputs" });
+  });
+});
+
+describe("proveSettlementPath — preapproval providers", () => {
+  /**
+   * The expectation for a preapproval capture, at its preparation time.
+   *
+   * @param raw - The capture.
+   * @returns The decoded capture and its expectation.
+   */
+  function capture(raw: string) {
+    const pt = decodePrepared(raw);
+    const root = pt.nodes.find(n => n.nodeId === pt.roots[0])!.exercise!;
+    const t = extractTransfer(root.chosenValue!);
+    return {
+      pt,
+      base: expectationFor(pt, { admin: t.instrumentAdmin, id: t.instrumentId }, t.amount),
+    };
+  }
+
+  it("proves a merchant that is its own provider (signed by the DSO and the merchant)", () => {
+    const { pt, base } = capture(read("mainnet-preapproval-self-provider.b64"));
+    const r = proveSettlementPath(pt, base);
+    expect(r).toMatchObject({ ok: true, kind: "amulet", preapprovalProvider: base.payTo });
+  });
+
+  it("proves a merchant whose validator is its provider", () => {
+    const { pt, base } = capture(read("mainnet-preapproval-distinct-provider.b64"));
+    const r = proveSettlementPath(pt, base);
+    expect(r.ok).toBe(true);
+    expect(r.ok && r.preapprovalProvider).not.toBe(base.payTo);
+  });
+
+  it("refuses a self-provided preapproval with a third, foreign signatory", () => {
+    const { pt, base } = capture(read("mainnet-preapproval-self-provider.b64"));
+    const forged = withInput(pt, "Splice.AmuletRules:TransferPreapproval", ic => ({
+      ...ic,
+      signatories: [...ic.signatories, STRANGER],
+    }));
+    expect(proveSettlementPath(forged, base)).toEqual({
+      ok: false,
+      reason: "invalid_exact_canton_preapproval_missing",
+    });
+  });
+
+  it("refuses two preapprovals (a decoy next to the real one)", () => {
+    const { pt, base } = capture(read("mainnet-preapproval-self-provider.b64"));
+    const pre = pt.inputContracts.find(
+      ic => ic.templateQualifiedName === "Splice.AmuletRules:TransferPreapproval",
+    )!;
+    const doubled = {
+      ...pt,
+      inputContracts: [...pt.inputContracts, { ...pre, contractId: "00decoy" }],
+    };
+    expect(proveSettlementPath(doubled, base).ok).toBe(false);
   });
 });
 

@@ -7,9 +7,6 @@
  * A committed update IS the settlement: confirming participants re-interpret
  * the signed transaction and commit exactly it, so its effects are the ones
  * verify proved from the signed bytes. There is no separate funds-moved read.
- *
- * Ported from the production facilitator's TransferFactoryService, adapted to
- * this package's local ledger client.
  */
 import type { CantonClient } from "./client.js";
 
@@ -29,6 +26,38 @@ export function isDefiniteExecuteRefusal(err: unknown): boolean {
   const e = err as { code?: unknown; status?: unknown } | null;
   if (e?.code !== "HTTP_ERROR" || typeof e.status !== "number") return false;
   return DEFINITE_EXECUTE_REFUSALS.has(e.status);
+}
+
+/** Definite refusals caused by the facilitator's own access (credentials, a
+ *  missing route, a rate limit), as opposed to the submitted transaction. */
+const FACILITATOR_SIDE_REFUSALS = new Set([401, 403, 404, 429]);
+
+/**
+ * True when /execute refused the request for a reason on the facilitator's
+ * side rather than the transaction's.
+ *
+ * @param err - The error a relay threw.
+ * @returns True for an HTTP 401, 403, 404 or 429 refusal.
+ */
+export function isFacilitatorSideRefusal(err: unknown): boolean {
+  const e = err as { code?: unknown; status?: unknown } | null;
+  return (
+    e?.code === "HTTP_ERROR" &&
+    typeof e.status === "number" &&
+    FACILITATOR_SIDE_REFUSALS.has(e.status)
+  );
+}
+
+/**
+ * True when `err` is an HTTP response with this status.
+ *
+ * @param err - The error thrown by the client.
+ * @param status - The HTTP status.
+ * @returns Whether it matches.
+ */
+function isHttpStatus(err: unknown, status: number): boolean {
+  const e = err as { code?: unknown; status?: unknown } | null;
+  return e?.code === "HTTP_ERROR" && e.status === status;
 }
 
 /** Dependencies for {@link TransferFactoryService}. */
@@ -55,7 +84,8 @@ export type SubmissionLookup =
   /** No completion, and no transaction carrying its command id up to the ledger
    *  end of a participant that hosts the payer (so it sees all the payer's
    *  transactions). Final only once the transaction can no longer be recorded
-   *  (see the facilitator scheme's settlement deadline). */
+   *  (see the facilitator scheme's settlement deadline), and only when no relay
+   *  of it was ever reported as a duplicate. */
   | { status: "absent" }
   /** The ledger could not be read conclusively. */
   | { status: "unknown" };
@@ -70,10 +100,13 @@ export class SubmissionOutcomeUnknownError extends Error {
    * @param cause - The underlying read failure.
    * @param beginOffset - The ledger offset read before submitting; the outcome,
    *   if any, lies after it.
+   * @param duplicate - The participant reported the command as already accepted,
+   *   so an earlier relay of it may have committed before `beginOffset`.
    */
   constructor(
     readonly cause: unknown,
     readonly beginOffset: number,
+    readonly duplicate = false,
   ) {
     super(
       `interactive submission accepted but its outcome could not be read: ${
@@ -126,7 +159,7 @@ export class TransferFactoryService {
       // timeout, a dropped connection, an unreadable body or a 5xx may have
       // reached the ledger — that outcome is unknown, never a rejection.
       if (isDefiniteExecuteRefusal(err)) throw err;
-      throw new SubmissionOutcomeUnknownError(err, offset0);
+      throw new SubmissionOutcomeUnknownError(err, offset0, isHttpStatus(err, 409));
     }
     // /execute is async: it normally answers `{}` with the updateId on the
     // completion stream.
@@ -142,8 +175,9 @@ export class TransferFactoryService {
     } catch (err) {
       // A completion carrying a non-zero status is a real refusal — nothing
       // moved. Any other read failure is an unknown outcome, never a rejection.
-      if ((err as { code?: unknown } | null)?.code === "SUBMISSION_FAILED") throw err;
-      throw new SubmissionOutcomeUnknownError(err, offset0);
+      const code = (err as { code?: unknown } | null)?.code;
+      if (code === "SUBMISSION_FAILED") throw err;
+      throw new SubmissionOutcomeUnknownError(err, offset0, code === "DUPLICATE_SUBMISSION");
     }
   }
 
@@ -176,14 +210,15 @@ export class TransferFactoryService {
       }
       if (completion.kind === "rejected") return { status: "rejected" };
       if (completion.kind === "malformed") return { status: "unknown" };
-      // "duplicate" (an earlier relay of this transaction was accepted) and
-      // "absent" both fall through to the authoritative command-id search.
       const updateId = await this.deps.client.findCommandUpdateId(
         input.payer,
         input.commandId,
         input.beginOffset,
       );
       if (updateId) return { status: "committed", updateId };
+      // An earlier relay of this command was accepted; it may have committed
+      // before the searched range, so a miss proves nothing.
+      if (completion.kind === "duplicate") return { status: "unknown" };
       const hostsPayer = await this.deps.client.isPartyLocal(input.payer);
       return hostsPayer ? { status: "absent" } : { status: "unknown" };
     } catch {

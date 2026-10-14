@@ -13,6 +13,7 @@ import { ExactCantonScheme } from "../../src/exact/facilitator/scheme.js";
 import { encodeInlinePaymentPayload } from "../../src/inline-payload.js";
 import { decodePrepared } from "../../src/prepared-transfer.js";
 import { SubmissionOutcomeUnknownError } from "../../src/ledger/transfer-factory.js";
+import { CantonError } from "../../src/ledger/client.js";
 import type { FacilitatorCantonSigner, SubmissionLookup } from "../../src/signer.js";
 
 const FIX = fileURLToPath(new URL("../../src/__fixtures__/", import.meta.url));
@@ -116,6 +117,18 @@ describe("settle", () => {
     expect(r).toMatchObject({ success: false, errorReason: "invalid_exact_canton_execute_failed" });
   });
 
+  it("a refusal on the facilitator's side (credentials, rate limit) is a ledger error", async () => {
+    for (const status of [401, 403, 404, 429]) {
+      const { s } = signer({
+        executeSubmission: async () => {
+          throw new CantonError(`HTTP ${status}`, "HTTP_ERROR", status);
+        },
+      });
+      const r = await new ExactCantonScheme(s, { networks: [NETWORK] }).settle(payload(), reqs);
+      expect(r.errorReason).toBe("unexpected_canton_ledger_error");
+    }
+  });
+
   it("does not relay a payload that fails verification", async () => {
     const { s, executed } = signer({ verifySignature: async () => ({ verified: false }) });
     const r = await new ExactCantonScheme(s, { networks: [NETWORK] }).settle(payload(), reqs);
@@ -143,7 +156,7 @@ describe("settle", () => {
     expect(typeof record.commandId).toBe("string");
   });
 
-  it("is a final error when the pending relay cannot be remembered", async () => {
+  it("stays pending when the relay cannot be remembered", async () => {
     const { s } = signer({ executeSubmission: unknownOutcome });
     const failing = {
       get: async () => undefined,
@@ -156,7 +169,7 @@ describe("settle", () => {
       networks: [NETWORK],
       pendingSettlementStore: failing,
     }).settle(payload(), reqs);
-    expect(r.errorReason).toBe("unexpected_canton_ledger_error");
+    expect(r.errorReason).toBe("settlement_pending");
   });
 });
 
@@ -206,7 +219,10 @@ describe("settle retry after settlement_pending", () => {
         beginOffset: 77,
       }),
     ]);
-    expect(await store.get(HASH)).toBeUndefined();
+    expect(JSON.parse((await store.get(HASH))!)).toMatchObject({
+      kind: "settled",
+      updateId: "1220-c",
+    });
   });
 
   it("reconciles even after the transfer's executeBefore has passed", async () => {
@@ -262,6 +278,52 @@ describe("settle retry after settlement_pending", () => {
     expect(r.transaction).not.toBe("1220-someone-else");
     expect(executed).toHaveLength(1);
     expect(await store.get(HASH)).toBeDefined();
+  });
+
+  it("a duplicate relay never becomes a final failure, even past the deadline", async () => {
+    const store = new InMemoryPendingSettlementStore();
+    const first = signer({
+      executeSubmission: async () => {
+        throw new SubmissionOutcomeUnknownError(new Error("409"), 900, true);
+      },
+    });
+    const scheme = (s: FacilitatorCantonSigner) =>
+      new ExactCantonScheme(s, {
+        networks: [NETWORK],
+        pendingSettlementStore: store,
+        ledgerTimeToleranceMs: TOLERANCE_MS,
+      });
+    expect((await scheme(first.s).settle(payload(), reqs)).errorReason).toBe("settlement_pending");
+    expect(JSON.parse((await store.get(HASH))!)).toMatchObject({ duplicate: true });
+    vi.setSystemTime(AFTER_FINAL_MS);
+    const second = signer({ lookupSubmission: async () => ({ status: "absent" }) });
+    expect((await scheme(second.s).settle(payload(), reqs)).errorReason).toBe("settlement_pending");
+  });
+
+  it("answers a retry after a lost success response from memory, without relaying again", async () => {
+    const store = new InMemoryPendingSettlementStore();
+    const first = signer();
+    const opts = { networks: [NETWORK], pendingSettlementStore: store };
+    expect((await new ExactCantonScheme(first.s, opts).settle(payload(), reqs)).success).toBe(true);
+    const second = signer();
+    const r = await new ExactCantonScheme(second.s, opts).settle(payload(), reqs);
+    expect(r).toMatchObject({ success: true, transaction: "1220-settled" });
+    expect(second.executed).toHaveLength(0);
+  });
+
+  it("stays pending when the retry cannot re-verify for a ledger read failure", async () => {
+    const store = new InMemoryPendingSettlementStore();
+    const first = signer({ executeSubmission: unknownOutcome });
+    const opts = { networks: [NETWORK], pendingSettlementStore: store };
+    await new ExactCantonScheme(first.s, opts).settle(payload(), reqs);
+    const second = signer({
+      verifySignature: async () => {
+        throw new Error("topology unavailable");
+      },
+    });
+    const r = await new ExactCantonScheme(second.s, opts).settle(payload(), reqs);
+    expect(r).toMatchObject({ errorReason: "settlement_pending", transaction: HASH });
+    expect(second.executed).toHaveLength(0);
   });
 
   it("ignores a store entry that is not a pending record", async () => {

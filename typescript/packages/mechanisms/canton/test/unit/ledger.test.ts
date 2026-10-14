@@ -154,6 +154,21 @@ describe("submission lookup", () => {
     expect(asked).toEqual([[PAYER, "cmd", 5]]);
   });
 
+  it("a duplicate-command completion with no transaction found → unknown, never absent", async () => {
+    const svc = service({ findCompletion: async () => ({ kind: "duplicate", message: "dup" }) });
+    expect(await svc.lookup(input)).toEqual({ status: "unknown" });
+  });
+
+  it("HTTP 409 at /execute is an unknown outcome flagged as a duplicate", async () => {
+    const svc = service({
+      interactiveSubmissionExecute: async () => {
+        throw new CantonError("409", "HTTP_ERROR", 409);
+      },
+    });
+    const err = await svc.execute(execInput()).catch((e: unknown) => e);
+    expect(err).toMatchObject({ duplicate: true });
+  });
+
   it("a duplicate-command completion still searches by command id", async () => {
     const svc = service({
       findCompletion: async () => ({ kind: "duplicate", message: "already exists" }),
