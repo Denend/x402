@@ -25,11 +25,6 @@ const CC = JSON.parse(readFileSync(FIX + "mainnet-0.1.21.json", "utf8")).transfe
 };
 
 const FAC = "facilitator::1220" + "ff".repeat(32);
-// The factory the fixture's root exercise targets — what the facilitator resolves.
-const CC_FACTORY = (() => {
-  const d = decodePrepared(CC_RAW);
-  return d.nodes.find(n => n.nodeId === d.roots[0])!.exercise!.contractId!;
-})();
 const NETWORK = "canton:mainnet" as const;
 const SYNC = "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc";
 
@@ -60,13 +55,6 @@ function facilitatorSigner(executes: string[], kinds: string[] = []): Facilitato
   return {
     getAddresses: () => [FAC],
     verifySignature: async () => ({ verified: true, preparedTxHashHex: "cd".repeat(32) }),
-    fetchPreapproval: async () => ({
-      receiver: CC.receiver,
-      dso: CC.instrumentId.admin,
-      expiresAt: new Date(Date.now() + 1_000_000_000).toISOString(),
-    }),
-    registryBaseUrl: () => undefined,
-    resolveTransferFactoryId: async () => CC_FACTORY,
     executeSubmission: async args => {
       executes.push("executed");
       kinds.push(args.transferKind);
@@ -168,7 +156,10 @@ describe("exact/canton integration (CC, stubbed signers)", () => {
         throw new SubmissionOutcomeUnknownError(new Error("completion read timed out"));
       },
     };
-    const facilitator = new FacilitatorScheme(signer, { synchronizerId: SYNC });
+    const facilitator = new FacilitatorScheme(signer, {
+      networks: [NETWORK],
+      synchronizerId: SYNC,
+    });
 
     const settle = await facilitator.settle(payload as never, reqs);
     expect(settle.success).toBe(false);
@@ -183,7 +174,10 @@ describe("exact/canton integration (CC, stubbed signers)", () => {
         throw new Error("SUBMISSION_FAILED: rejected");
       },
     };
-    const facilitator = new FacilitatorScheme(signer, { synchronizerId: SYNC });
+    const facilitator = new FacilitatorScheme(signer, {
+      networks: [NETWORK],
+      synchronizerId: SYNC,
+    });
 
     const settle = await facilitator.settle(payload as never, reqs);
     expect(settle.success).toBe(false);

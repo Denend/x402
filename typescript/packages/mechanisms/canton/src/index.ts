@@ -20,7 +20,6 @@ export type {
   ClientCantonSigner,
   FacilitatorCantonSigner,
   CantonSchemeConfig,
-  PreapprovalView,
   ExecuteResult,
 } from "./signer.js";
 
@@ -62,6 +61,7 @@ export { ExactCantonScheme as ExactCantonFacilitatorScheme } from "./exact/facil
 export { toClientCantonSigner, toFacilitatorCantonSigner } from "./signer-factory.js";
 export type {
   CantonLedgerConfig,
+  CantonScanConfig,
   ClientCantonSignerConfig,
   FacilitatorCantonSignerConfig,
 } from "./signer-factory.js";

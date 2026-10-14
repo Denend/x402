@@ -435,7 +435,7 @@ const ENTRY_VALUE = 2;
  *  `int64`/`timestamp` are Daml `Int`/`Time`, serialized as protobuf VARINTS
  *  (not length-delimited); their `value` is the decimal string of the varint so
  *  callers compare exactly without precision loss. */
-type Leaf =
+export type Leaf =
   | { kind: "party"; value: string }
   | { kind: "numeric"; value: string }
   | { kind: "text"; value: string }
@@ -446,7 +446,7 @@ type Leaf =
  * A field within a record, by label (label may be absent in normalized
  * encodings — then `label` is "" and callers fall back to declaration order).
  */
-interface RecordEntry {
+export interface RecordEntry {
   label: string;
   value: Uint8Array; // the encoded `Value`
 }
@@ -475,7 +475,7 @@ const MAX_ROOTS = 16;
  *
  * @param value
  */
-function recordEntries(value: Uint8Array): RecordEntry[] {
+export function recordEntries(value: Uint8Array): RecordEntry[] {
   assertSingleValueMember(value);
   const v = decodeMessage(value);
   const rec = lenFieldUnique(v, V_RECORD, "Value.record");
@@ -596,7 +596,7 @@ function assertSingleValueMember(value: Uint8Array): void {
  *
  * @param value
  */
-function leafOf(value: Uint8Array): Leaf | undefined {
+export function leafOf(value: Uint8Array): Leaf | undefined {
   assertSingleValueMember(value);
   const v = decodeMessage(value);
   const party = lenFieldUnique(v, V_PARTY, "Value.party");
@@ -815,6 +815,7 @@ const PT_TRANSACTION = 1;
 const PT_METADATA = 2;
 const MD_SUBMITTER_INFO = 2;
 const SI_ACT_AS = 1;
+const SI_COMMAND_ID = 2;
 // Metadata "needs to be signed" block (interactive_submission_service.proto):
 //   submitter_info=2 synchronizer_id=3 mediator_group=4 transaction_uuid=5
 //   preparation_time=6 input_contracts=7 min_ledger_effective_time=9
@@ -956,6 +957,10 @@ export interface DecodedNode {
 export interface DecodedPrepared {
   /** `act_as` parties from Metadata.submitter_info (authoritative submitter). */
   actAs: string[];
+  /** Metadata.submitter_info.command_id (SIGNED). Identifies the committed
+   *  transaction on the submitting participant, so settle can reconcile an
+   *  execute whose outcome it could not read. */
+  commandId?: string | undefined;
   /** DamlTransaction.roots — node_ids declared as transaction roots. */
   roots: string[];
   /** EVERY node in DamlTransaction.nodes, fully accounted (recognized or not). */
@@ -1215,6 +1220,7 @@ export function decodePrepared(preparedTransactionB64: string): DecodedPrepared 
   // non-repeated: a duplicate would let a last-wins participant read a different
   // one than we validate, so reject duplicates (act_as / nodes stay repeated).
   const actAs: string[] = [];
+  let commandId: string | undefined;
   let synchronizerId: string | undefined;
   let preparationTime: bigint | undefined;
   let minLedgerEffectiveTime: bigint | undefined;
@@ -1228,7 +1234,10 @@ export function decodePrepared(preparedTransactionB64: string): DecodedPrepared 
     const md = decodeMessage(metadata);
     const si = lenFieldUnique(md, MD_SUBMITTER_INFO, "Metadata.submitter_info");
     if (si !== undefined) {
-      for (const a of lenFields(decodeMessage(si), SI_ACT_AS)) actAs.push(utf8(a));
+      const siFields = decodeMessage(si);
+      for (const a of lenFields(siFields, SI_ACT_AS)) actAs.push(utf8(a));
+      const cmd = lenFieldUnique(siFields, SI_COMMAND_ID, "SubmitterInfo.command_id");
+      if (cmd !== undefined) commandId = utf8(cmd);
     }
     // synchronizer_id (field 3) — SIGNED; pinned to caller intent by the arms.
     const sync = lenFieldUnique(md, MD_SYNCHRONIZER_ID, "Metadata.synchronizer_id");
@@ -1364,6 +1373,7 @@ export function decodePrepared(preparedTransactionB64: string): DecodedPrepared 
   }
   return {
     actAs,
+    commandId,
     roots,
     nodes,
     exercises,
@@ -2078,7 +2088,7 @@ function assertNoForeignParties(
  * money-position rule holds regardless.
  * ──────────────────────────────────────────────────────────────────────── */
 
-const PREAPPROVAL_TEMPLATE = "Splice.AmuletRules:TransferPreapproval";
+export const PREAPPROVAL_TEMPLATE = "Splice.AmuletRules:TransferPreapproval";
 const FEATURED_APP_RIGHT_TEMPLATE = "Splice.Amulet:FeaturedAppRight";
 const FEATURED_APP_MARKER_TEMPLATE = "Splice.Amulet:FeaturedAppActivityMarker";
 /** Delivery choices that consume a TransferPreapproval. `_Send` is the legacy
@@ -2140,7 +2150,7 @@ function extractTransferPreapproval(
  * @param expectedReceiver
  * @param instrumentAdmin
  */
-function matchPreapprovalProvider(
+export function matchPreapprovalProvider(
   decoded: DecodedPrepared,
   expectedReceiver: string,
   instrumentAdmin: string,
@@ -2371,7 +2381,7 @@ function readMemo(value: Uint8Array): string | undefined {
  * @param position
  * @param label
  */
-function entryByDeclOrder(
+export function entryByDeclOrder(
   entries: RecordEntry[],
   position: number,
   label: string,

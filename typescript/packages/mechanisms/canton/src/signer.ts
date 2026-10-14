@@ -2,24 +2,13 @@
  * Injected ledger-access interfaces. The mechanism package carries the
  * PROTOCOL logic (payload codec, verify-before-sign, structural verify, settle
  * shape); all access to a Canton participant / Scan / registry is supplied by
- * the integrator through these interfaces. This keeps `@x402/canton` free of any
+ * the integrator through these interfaces. The facilitator side needs only the
+ * participant: verify reads everything else from the signed transaction. This keeps `@x402/canton` free of any
  * specific ledger client and free of operational concerns (rate-limits,
  * attribution, workers) that belong to a facilitator deployment, not the scheme.
  *
  * Mirrors the SVM mechanism's `ClientSvmSigner` / `FacilitatorSvmSigner` split.
  */
-
-/** A live TransferPreapproval for a merchant (Amulet/Canton-Coin path). */
-export interface PreapprovalView {
-  receiver: string;
-  /** Instrument admin the preapproval is scoped to (the DSO for Amulet). */
-  dso: string;
-  expiresAt: string;
-  /** On-ledger app provider recorded on the preapproval, if any. */
-  provider?: string;
-  /** Not-yet-active before this instant, if present. */
-  validFrom?: string;
-}
 
 /** Result of relaying the payer-signed transaction (ExecuteSubmission). */
 export interface ExecuteResult {
@@ -77,8 +66,8 @@ export interface ClientCantonSigner {
 }
 
 /**
- * Facilitator-side signer + ledger capabilities. `verify` uses the read
- * capabilities; `settle` additionally relays via `executeSubmission`.
+ * Facilitator-side signer + ledger capabilities. `verify` checks the payer's
+ * signature; `settle` additionally relays via `executeSubmission`.
  */
 export interface FacilitatorCantonSigner {
   /** Facilitator parties this deployment relays as (the `feePayer`). */
@@ -98,34 +87,6 @@ export interface FacilitatorCantonSigner {
     preparedTxHashHex?: string;
     publishedProtocolKeys?: number;
   }>;
-  /** Live Amulet TransferPreapproval for the merchant, or null. */
-  fetchPreapproval(party: string): Promise<PreapprovalView | null>;
-  /**
-   * Authoritative current view of the payer's holdings (cid → ledger Decimal),
-   * or undefined when this facilitator does not host the payer with read access.
-   */
-  fetchOwnedHoldingAmounts?(party: string): Promise<Map<string, string> | undefined>;
-  /**
-   * DA Registry Utility base URL for a non-Amulet CIP-56 instrument admin, or
-   * undefined when the admin is not a configured registry (Canton Coin). The
-   * signer's config is the single source of the registry map: verify selects
-   * the registry path with it and the factory is resolved against it.
-   */
-  registryBaseUrl(instrumentAdmin: string): string | undefined;
-  /**
-   * Contract id of the transfer factory for this transfer, resolved by the
-   * facilitator itself (SV Scan for Canton Coin, the registry for a CIP-56
-   * token) — never taken from the payload. Verify pins the signed root
-   * exercise to it. Implementations may cache; `refresh` bypasses the cache.
-   */
-  resolveTransferFactoryId(args: {
-    sender: string;
-    receiver: string;
-    amount: string;
-    instrumentId: { admin: string; id: string };
-    inputHoldingCids: string[];
-    refresh?: boolean;
-  }): Promise<string>;
   /** Relay the payer-signed transaction (ExecuteSubmission). Settle only. */
   executeSubmission(args: {
     preparedTransactionBytes: Buffer;
@@ -146,6 +107,11 @@ export interface CantonSchemeConfig {
   /** Which merchants this facilitator will burn its own traffic for. */
   merchantPolicy?: "open" | "provider" | "allowlist" | "provider-or-allowlist";
   merchantAllowlist?: readonly string[];
-  /** Out-of-band-trusted registry infra parties (instrument admin → party[]). */
+  /**
+   * CIP-56 registries this facilitator settles for: registrar (instrument admin)
+   * → the registry infrastructure parties trusted to appear in its transfers
+   * (e.g. the Registry Utility operator and the token's provider). A registrar
+   * absent here is not settled.
+   */
   registryTrustedParties?: Record<string, string[]>;
 }

@@ -7,7 +7,7 @@
  *   needs a numeric non-zero code; anything else is unreadable.
  * - funds-moved: a pending AmuletTransferInstruction / TransferOffer is not a
  *   delivery; the registry path reads the standard's result tag.
- * - Scan never receives the ledger token; the factory id is cached.
+ * - Scan never receives the ledger token.
  */
 import { describe, it, expect } from "vitest";
 import { CantonClient, CantonError } from "../../src/ledger/client.js";
@@ -17,7 +17,8 @@ import {
   isDefiniteExecuteRefusal,
   type TransferFactoryDeps,
 } from "../../src/ledger/transfer-factory.js";
-import { toFacilitatorCantonSigner } from "../../src/signer-factory.js";
+import { generateKeyPairSync } from "node:crypto";
+import { toClientCantonSigner } from "../../src/signer-factory.js";
 
 const PAYER = "payer::1220" + "aa".repeat(32);
 const PKG = "0f".repeat(32);
@@ -215,12 +216,45 @@ describe("completion parsing", () => {
   });
 });
 
-describe("facilitator signer — Scan auth and factory cache", () => {
+describe("client signer — Scan auth", () => {
+  const MERCHANT = "m::1220" + "bb".repeat(32);
+  const ADMIN = "dso::1220" + "cc".repeat(32);
+
   function signer(opts: { scanToken?: string } = {}) {
     const calls: Array<{ url: string; auth: string | undefined }> = [];
     const fetchStub = (async (url: string, init?: RequestInit) => {
       const headers = (init?.headers ?? {}) as Record<string, string>;
       calls.push({ url, auth: headers.Authorization });
+      if (url.endsWith("/v2/state/ledger-end")) {
+        return new Response(JSON.stringify({ offset: 7 }), { status: 200 });
+      }
+      if (url.endsWith("/v2/state/active-contracts")) {
+        return new Response(
+          JSON.stringify([
+            {
+              contractEntry: {
+                JsActiveContract: {
+                  createdEvent: {
+                    contractId: "h1",
+                    templateId: `${PKG}:Splice.Amulet:Amulet`,
+                    interfaceViews: [
+                      {
+                        interfaceId: `${PKG}:Splice.Api.Token.HoldingV1:Holding`,
+                        viewValue: {
+                          owner: PAYER,
+                          instrumentId: { admin: ADMIN, id: "Amulet" },
+                          amount: "5.0",
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          ]),
+          { status: 200 },
+        );
+      }
       if (url.includes("transfer-factory")) {
         return new Response(
           JSON.stringify({
@@ -231,31 +265,39 @@ describe("facilitator signer — Scan auth and factory cache", () => {
           { status: 200 },
         );
       }
+      if (url.endsWith("/v2/interactive-submission/prepare")) {
+        return new Response(
+          JSON.stringify({ preparedTransaction: "AA==", preparedTransactionHash: "AA==" }),
+          { status: 200 },
+        );
+      }
       return new Response("{}", { status: 404 });
     }) as typeof fetch;
-    const s = toFacilitatorCantonSigner({
+    const s = toClientCantonSigner({
       participantUrl: "http://participant.invalid",
       token: "LEDGER-SECRET",
       userId: "u",
       synchronizerId: "global-domain::1220test",
       scanUrl: "http://scan.invalid",
-      facilitatorParties: ["fac::1220" + "ff".repeat(32)],
+      party: PAYER,
+      privateKeyPem: generateKeyPairSync("ed25519")
+        .privateKey.export({ type: "pkcs8", format: "pem" })
+        .toString(),
       fetch: fetchStub,
       ...opts,
     });
     return { s, calls };
   }
-  const args = {
-    sender: PAYER,
-    receiver: "m::1220" + "bb".repeat(32),
+  const input = {
+    receiver: MERCHANT,
     amount: "1.0",
-    instrumentId: { admin: "dso::1220" + "cc".repeat(32), id: "Amulet" },
-    inputHoldingCids: ["h1"],
+    instrumentId: { admin: ADMIN, id: "Amulet" },
+    executeBeforeSeconds: 60,
   };
 
   it("sends no Authorization to Scan by default (never the ledger token)", async () => {
     const { s, calls } = signer();
-    await s.resolveTransferFactoryId(args);
+    await s.prepareTransfer(input);
     const scanCalls = calls.filter(c => c.url.startsWith("http://scan.invalid"));
     expect(scanCalls.length).toBeGreaterThan(0);
     expect(scanCalls.every(c => c.auth === undefined)).toBe(true);
@@ -263,37 +305,10 @@ describe("facilitator signer — Scan auth and factory cache", () => {
 
   it("sends only the dedicated scanToken to Scan", async () => {
     const { s, calls } = signer({ scanToken: "SCAN-ONLY" });
-    await s.resolveTransferFactoryId(args);
+    await s.prepareTransfer(input);
     const scanCalls = calls.filter(c => c.url.startsWith("http://scan.invalid"));
     expect(scanCalls.every(c => c.auth === "Bearer SCAN-ONLY")).toBe(true);
-  });
-
-  it("refuses a non-sv Scan flavor at construction", () => {
-    expect(() =>
-      toFacilitatorCantonSigner({
-        participantUrl: "http://participant.invalid",
-        token: "t",
-        userId: "u",
-        synchronizerId: "global-domain::1220test",
-        scanUrl: "http://scan.invalid",
-        scanFlavor: "validator",
-        facilitatorParties: ["fac::1220" + "ff".repeat(32)],
-      }),
-    ).toThrow(/requires scanFlavor "sv"/);
-  });
-
-  it("keys the cache unambiguously (a party id contains `::`)", async () => {
-    const { s, calls } = signer();
-    await s.resolveTransferFactoryId({ ...args, instrumentId: { admin: "R::1220ab", id: "X" } });
-    await s.resolveTransferFactoryId({ ...args, instrumentId: { admin: "R", id: "1220ab::X" } });
-    expect(calls.filter(c => c.url.includes("transfer-factory"))).toHaveLength(2);
-  });
-
-  it("caches the factory id and throttles forced refreshes", async () => {
-    const { s, calls } = signer();
-    expect(await s.resolveTransferFactoryId(args)).toBe("00factory");
-    await s.resolveTransferFactoryId(args);
-    await s.resolveTransferFactoryId({ ...args, refresh: true });
-    expect(calls.filter(c => c.url.includes("transfer-factory"))).toHaveLength(1);
+    const ledgerCalls = calls.filter(c => c.url.startsWith("http://participant.invalid"));
+    expect(ledgerCalls.every(c => c.auth === "Bearer LEDGER-SECRET")).toBe(true);
   });
 });

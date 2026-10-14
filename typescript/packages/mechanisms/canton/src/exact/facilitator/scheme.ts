@@ -25,10 +25,10 @@ export interface CantonFacilitatorOptions extends CantonSchemeConfig {
   /** The Global Synchronizer id this facilitator settles on, advertised in the
    *  402 `extra.synchronizerId` via {@link ExactCantonScheme.getExtra}. */
   synchronizerId?: string;
-  /** The exact Canton networks this scheme serves. When set, requirements on
-   *  any other network are rejected with `invalid_network`.
-   *  {@link registerExactCantonScheme} sets it from its `networks`. */
-  networks?: readonly Network[];
+  /** The exact Canton networks this scheme serves; requirements on any other
+   *  network are rejected with `invalid_network`. Required, so a scheme
+   *  registered under a wildcard still refuses a network it does not settle on. */
+  networks: readonly Network[];
 }
 
 /** Facilitator-side `exact` scheme for Canton networks. */
@@ -40,12 +40,16 @@ export class ExactCantonScheme implements SchemeNetworkFacilitator {
    * Construct the facilitator-side Canton exact scheme.
    *
    * @param signer - Ledger access + facilitator relaying key(s).
-   * @param options - Trust anchors, registry config, and the synchronizer id.
+   * @param options - Served networks, trust anchors, registry config, and the synchronizer id.
    */
   constructor(
     private readonly signer: FacilitatorCantonSigner,
-    private readonly options: CantonFacilitatorOptions = {},
-  ) {}
+    private readonly options: CantonFacilitatorOptions,
+  ) {
+    if (options.networks.length === 0) {
+      throw new Error("ExactCantonScheme: `networks` must name at least one Canton network");
+    }
+  }
 
   /**
    * Mechanism `extra` for the /supported response: this facilitator's feePayer

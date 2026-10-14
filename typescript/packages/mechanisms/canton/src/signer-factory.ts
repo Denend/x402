@@ -7,8 +7,9 @@
  * `toClientCantonSigner` gives a payer everything to resolve a transfer factory,
  * interactive-prepare a `TransferFactory_Transfer`, and sign the recomputed hash.
  * `toFacilitatorCantonSigner` gives a facilitator everything to verify a payer's
- * inline signature (hash binding + topology-key Ed25519), read a merchant's
- * preapproval and a payer's holdings, and relay the signed transaction.
+ * inline signature (hash binding + topology-key Ed25519) and relay the signed
+ * transaction. It needs only the participant: verify proves the factory, the
+ * delivery and the inputs from the signed transaction itself.
  *
  * Mirrors the SVM mechanism's `toClientSvmSigner` / `toFacilitatorSvmSigner`
  * split (see `mechanisms/svm/src/signer.ts`), and ports the production
@@ -21,14 +22,9 @@ import { recomputeHash } from "./ledger/canton-hash.js";
 import { signPreparedTransactionHash } from "./ledger/external-party.js";
 import { createPayerProofVerifier, rawEd25519ToDerSpki } from "./ledger/payer-proof.js";
 import { TransferFactoryService } from "./ledger/transfer-factory.js";
-import type {
-  ClientCantonSigner,
-  FacilitatorCantonSigner,
-  PreapprovalView,
-  ExecuteResult,
-} from "./signer.js";
+import type { ClientCantonSigner, FacilitatorCantonSigner, ExecuteResult } from "./signer.js";
 
-/** Shared ledger/Scan connection config for both signers. */
+/** Participant connection config shared by both signers. */
 export interface CantonLedgerConfig {
   /** Participant JSON Ledger API base URL. */
   participantUrl: string;
@@ -38,10 +34,17 @@ export interface CantonLedgerConfig {
   userId: string;
   /** Global Synchronizer id to prepare on / read topology from. */
   synchronizerId: string;
-  /** SV Scan base URL (registry resolves, preapproval, holdings). */
+  /** Request timeout in ms for ledger + Scan calls. */
+  timeoutMs?: number;
+  /** Override the fetch implementation (tests). */
+  fetch?: typeof globalThis.fetch;
+}
+
+/** Scan and registry access, used where a transfer factory is resolved. */
+export interface CantonScanConfig {
+  /** SV Scan base URL (transfer factory resolve, preapproval and round reads). */
   scanUrl: string;
-  /** Scan flavor; `sv` unlocks the registry resolves. Defaults to `sv`. The
-   *  facilitator signer requires `sv`. */
+  /** Scan flavor; `sv` unlocks the registry resolves. Defaults to `sv`. */
   scanFlavor?: ScanFlavor;
   /** Additional SV Scan bases to fail over to. */
   scanFallbackUrls?: string[];
@@ -52,14 +55,10 @@ export interface CantonLedgerConfig {
   /** Non-Amulet CIP-56 registries: instrument admin party → DA Registry Utility
    *  base URL. */
   tokenRegistries?: Record<string, string>;
-  /** Request timeout in ms for ledger + Scan calls. */
-  timeoutMs?: number;
-  /** Override the fetch implementation (tests). */
-  fetch?: typeof globalThis.fetch;
 }
 
-/** Client-signer config: {@link CantonLedgerConfig} plus the payer's key. */
-export interface ClientCantonSignerConfig extends CantonLedgerConfig {
+/** Client-signer config: ledger and Scan access plus the payer's key. */
+export interface ClientCantonSignerConfig extends CantonLedgerConfig, CantonScanConfig {
   /** The payer party (`hint::namespace-fingerprint`). */
   party: string;
   /** The payer's Ed25519 private key as a PKCS8 PEM string (signs the
@@ -239,10 +238,9 @@ export function toClientCantonSigner(config: ClientCantonSignerConfig): ClientCa
 }
 
 /**
- * Build a concrete {@link FacilitatorCantonSigner} backed by a Canton participant
- * + Scan. Verifies a payer's inline signature (hash binding + topology-key
- * Ed25519), reads a merchant's preapproval and a payer's holdings, and relays the
- * signed transaction.
+ * Build a concrete {@link FacilitatorCantonSigner} backed by a Canton participant.
+ * Verifies a payer's inline signature (hash binding + topology-key Ed25519) and
+ * relays the signed transaction.
  *
  * @param config - Ledger/Scan connection plus the facilitator's own parties.
  * @returns A facilitator signer implementing verify/read/execute.
@@ -250,43 +248,13 @@ export function toClientCantonSigner(config: ClientCantonSignerConfig): ClientCa
 export function toFacilitatorCantonSigner(
   config: FacilitatorCantonSignerConfig,
 ): FacilitatorCantonSigner {
-  // Verify pins every Canton Coin transfer to the factory resolved on the SV
-  // Scan registry root, which the validator flavor does not serve. Refuse at
-  // construction instead of failing every payment.
-  if ((config.scanFlavor ?? "sv") !== "sv") {
-    throw new Error(
-      `toFacilitatorCantonSigner requires scanFlavor "sv" (got "${config.scanFlavor}"): ` +
-        `the facilitator resolves the Canton Coin transfer factory on SV Scan`,
-    );
-  }
   const client = new CantonClient({
     participantUrl: config.participantUrl,
     token: config.token,
     ...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
     ...(config.fetch ? { fetch: config.fetch } : {}),
   });
-  const scan = new ScanClient({
-    scanUrl: config.scanUrl,
-    ...(config.scanToken !== undefined ? { token: config.scanToken } : {}),
-    flavor: config.scanFlavor ?? "sv",
-    ...(config.scanFallbackUrls ? { fallbackUrls: config.scanFallbackUrls } : {}),
-    ...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
-    ...(config.fetch ? { fetch: config.fetch } : {}),
-  });
   const tfSvc = new TransferFactoryService({ client, userId: config.userId });
-  const registryBaseUrl = (admin: string): string | undefined =>
-    Object.prototype.hasOwnProperty.call(config.tokenRegistries ?? {}, admin)
-      ? config.tokenRegistries![admin]
-      : undefined;
-  // Resolved factory ids per instrument. The factory is a long-lived contract
-  // (Amulet: the ExternalPartyAmuletRules), so a short TTL plus an explicit
-  // refresh on mismatch keeps it current without a Scan call per payment; the
-  // refresh is throttled so a stream of mismatching payloads cannot turn into a
-  // stream of Scan calls.
-  const factoryCache = new Map<string, { id: string; at: number }>();
-  const FACTORY_TTL_MS = 5 * 60_000;
-  const FACTORY_MIN_REFRESH_MS = 5_000;
-  const FACTORY_CACHE_MAX = 256;
   // Default key source: the participant JSON Ledger API JOSE route. A deployment
   // whose participant does not serve it (e.g. Splice) injects `fetchPayerSigningKey`.
   const keyLookup =
@@ -319,59 +287,6 @@ export function toFacilitatorCantonSigner(
           ? { publishedProtocolKeys: result.publishedProtocolKeys }
           : {}),
       };
-    },
-
-    registryBaseUrl,
-
-    async resolveTransferFactoryId(args) {
-      const { admin, id } = args.instrumentId;
-      // Party ids contain `::` themselves, so join unambiguously.
-      const key = JSON.stringify([admin, id]);
-      const now = Date.now();
-      const hit = factoryCache.get(key);
-      if (hit) {
-        const age = now - hit.at;
-        if (args.refresh ? age < FACTORY_MIN_REFRESH_MS : age < FACTORY_TTL_MS) return hit.id;
-      }
-      const base = registryBaseUrl(admin);
-      const factory = await scan.resolveTransferFactory({
-        sender: args.sender,
-        receiver: args.receiver,
-        amount: args.amount,
-        admin,
-        id,
-        inputHoldingCids: args.inputHoldingCids,
-        ...(base ? { registryBaseUrl: base } : {}),
-      });
-      if (typeof factory.factoryId !== "string" || factory.factoryId.length === 0) {
-        throw new Error("transfer-factory resolve returned no factoryId");
-      }
-      if (!factoryCache.has(key) && factoryCache.size >= FACTORY_CACHE_MAX) factoryCache.clear();
-      factoryCache.set(key, { id: factory.factoryId, at: now });
-      return factory.factoryId;
-    },
-
-    async fetchPreapproval(party): Promise<PreapprovalView | null> {
-      const rec = await scan.getTransferPreapprovalByParty(party);
-      if (!rec) return null;
-      return {
-        receiver: rec.receiver,
-        dso: rec.dso,
-        expiresAt: rec.expiresAt,
-        ...(rec.provider ? { provider: rec.provider } : {}),
-        ...(rec.validFrom !== undefined ? { validFrom: rec.validFrom } : {}),
-      };
-    },
-
-    async fetchOwnedHoldingAmounts(party): Promise<Map<string, string> | undefined> {
-      try {
-        return await scan.getOwnedAmuletAmounts(party);
-      } catch {
-        // A facilitator without SV Scan holdings access does not host this read;
-        // the verify path treats undefined as "cannot check" (falls back to its
-        // other gates) rather than failing the payment.
-        return undefined;
-      }
     },
 
     async executeSubmission(args): Promise<ExecuteResult> {

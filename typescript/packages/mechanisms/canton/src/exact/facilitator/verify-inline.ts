@@ -5,9 +5,10 @@
  *
  * The payer signs a relay-prepared `TransferFactory_Transfer` and carries it
  * inline. This proves, from the SIGNED bytes alone: the proven payer (act_as),
- * amount/receiver/instrument/synchronizer/memo, single-root-exercise, input
- * holdings, the deadline, and the Ed25519 signature — then confirms the merchant
- * holds a live preapproval (Amulet) or the transfer resolves `direct` (registry).
+ * amount/receiver/instrument/synchronizer/memo, single-root-exercise, the
+ * deadline and the Ed25519 signature, and (see ledger-proofs.ts) the factory,
+ * the direct delivery to the merchant and the input holdings covering the amount.
+ * No Scan or registry read is involved.
  */
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import {
@@ -23,6 +24,7 @@ import { wireAmountToLedgerDecimal } from "../../amount.js";
 import { CANTON_TRANSFER_METHOD } from "../../constants.js";
 import type { CantonErrorCode } from "../../types.js";
 import type { FacilitatorCantonSigner, CantonSchemeConfig } from "../../signer.js";
+import { proveSettlementPath, type TransferKind } from "./ledger-proofs.js";
 
 const EXECUTE_BEFORE_MARGIN_MS = 5_000;
 
@@ -35,8 +37,12 @@ export interface InlineVerifyResult {
   hashingSchemeVersion?: "HASHING_SCHEME_VERSION_V1" | "HASHING_SCHEME_VERSION_V2";
   preparedTxHashHex?: string;
   publishedProtocolKeys?: number;
-  /** Which funds-moved signal settle must use, as established by verify. */
-  transferKind?: "amulet" | "registry";
+  /** The instrument family verify proved the transfer settles through. */
+  transferKind?: TransferKind;
+  /** The signed command id, used by settle to find the committed transaction. */
+  commandId?: string;
+  /** The last instant (ms) the signed transaction allows as its ledger time. */
+  maxLedgerTimeMs?: number;
 }
 
 const fail = (reason: CantonErrorCode, payer = ""): InlineVerifyResult => ({
@@ -82,18 +88,6 @@ export function classifyMismatch(message: string): CantonErrorCode {
 }
 
 /**
- * Ledger Decimal ("0.0100000000") → atomic units (1 CC = 1e10), exact.
- *
- * @param value
- */
-function ledgerDecimalToAtomic(value: string): bigint | null {
-  if (!/^\d+(\.\d+)?$/.test(value)) return null;
-  const [whole, frac = ""] = value.split(".");
-  if (frac.length > 10) return null;
-  return BigInt(whole + frac.padEnd(10, "0"));
-}
-
-/**
  * Validate an inline transfer-factory payload against the merchant's
  * requirements, using injected ledger reads. Pure-async, no side effects.
  *
@@ -107,7 +101,7 @@ export async function verifyInlineTransfer(
   payload: PaymentPayload,
   requirements: PaymentRequirements,
   signer: FacilitatorCantonSigner,
-  config: CantonSchemeConfig & { synchronizerId?: string; networks?: readonly string[] } = {},
+  config: CantonSchemeConfig & { synchronizerId?: string; networks: readonly string[] },
   nowMsOverride?: number,
 ): Promise<InlineVerifyResult> {
   const facilitatorParties = new Set(signer.getAddresses());
@@ -121,7 +115,7 @@ export async function verifyInlineTransfer(
   if (payload.accepted.network !== requirements.network) {
     return fail("invalid_network");
   }
-  if (config.networks !== undefined && !config.networks.includes(requirements.network)) {
+  if (!config.networks.includes(requirements.network)) {
     return fail("invalid_network");
   }
 
@@ -199,7 +193,6 @@ export async function verifyInlineTransfer(
   let declaredInputs: string[];
   let declaredExecuteBefore: number | undefined;
   let rootContractId: string | undefined;
-  let registryDirectDelivery = false;
   try {
     assertDecodedTransferMatches(pt, {
       sender: payer,
@@ -228,11 +221,6 @@ export async function verifyInlineTransfer(
     rootContractId = ex?.contractId;
     declaredInputs = t?.inputHoldingCids ?? [];
     declaredExecuteBefore = t?.executeBeforeMs;
-    registryDirectDelivery = pt.exercises.some(
-      e =>
-        e.choiceId === "TransferRule_DirectTransfer" &&
-        e.templateQualifiedName === "Utility.Registry.V0.Rule.Transfer:TransferRule",
-    );
   } catch (err) {
     if (err instanceof PreparedTransferMismatchError) {
       return fail(classifyMismatch(err.message), payer);
@@ -240,84 +228,36 @@ export async function verifyInlineTransfer(
     return fail("invalid_exact_canton_malformed_payload", payer);
   }
 
-  // Rule 3 — the root exercise must target the transfer factory this
-  // facilitator resolves itself (SV Scan for Canton Coin, the registry for a
-  // CIP-56 token). The choice name and arguments are already pinned; pinning the
-  // contract makes the choice's body — and so every consequence — the real
-  // factory's, never a look-alike template a payer deployed. One refresh covers
-  // a factory that rotated since the cached read.
+  // Rules 3, 7 and 13 — the factory, the direct delivery to the merchant and
+  // the input holdings, all proven from the signed input contracts.
   if (!rootContractId) {
     return fail("invalid_exact_canton_malformed_payload", payer);
   }
-  try {
-    const resolveArgs = {
-      sender: payer,
-      receiver: requirements.payTo,
-      amount: expectedAmount,
-      instrumentId: { admin: extra.instrumentId.admin, id: extra.instrumentId.id },
-      inputHoldingCids: declaredInputs,
-    };
-    let factoryId = await signer.resolveTransferFactoryId(resolveArgs);
-    if (factoryId !== rootContractId) {
-      factoryId = await signer.resolveTransferFactoryId({ ...resolveArgs, refresh: true });
-    }
-    if (factoryId !== rootContractId) {
-      return fail("invalid_exact_canton_malformed_payload", payer);
-    }
-  } catch {
-    return fail("unexpected_canton_ledger_error", payer);
-  }
+  const nowMs = nowMsOverride ?? Date.now();
+  const path = proveSettlementPath(pt, {
+    payer,
+    payTo: requirements.payTo,
+    instrumentId: { admin: extra.instrumentId.admin, id: extra.instrumentId.id },
+    amount: expectedAmount,
+    inputHoldingCids: declaredInputs,
+    rootContractId,
+    trustedRegistrars: new Set(Object.keys(config.registryTrustedParties ?? {})),
+    nowMs,
+  });
+  if (!path.ok) return fail(path.reason, payer);
 
-  // Rule 7 — merchant must hold a live preapproval (Amulet), or the registry
-  // transfer must resolve `direct` (read structurally from the signed bytes).
-  const utilRegistry = signer.registryBaseUrl(extra.instrumentId.admin);
-  if (utilRegistry) {
-    if (!registryDirectDelivery) {
-      return fail("invalid_exact_canton_preapproval_missing", payer);
-    }
-    const policy = config.merchantPolicy ?? "open";
-    if (policy !== "open") {
-      const byAllowlist =
-        (policy === "allowlist" || policy === "provider-or-allowlist") &&
-        (config.merchantAllowlist ?? []).includes(requirements.payTo);
-      if (!byAllowlist) {
-        return fail("invalid_exact_canton_merchant_not_registered", payer);
-      }
-    }
-  } else {
-    let pre;
-    try {
-      pre = await signer.fetchPreapproval(requirements.payTo);
-    } catch {
-      return fail("invalid_exact_canton_preapproval_missing", payer);
-    }
-    if (!pre) return fail("invalid_exact_canton_preapproval_missing", payer);
-    // Bind it: right receiver + right instrument admin.
-    if (pre.receiver !== requirements.payTo || pre.dso !== extra.instrumentId.admin) {
-      return fail("invalid_exact_canton_preapproval_missing", payer);
-    }
-    const policy = config.merchantPolicy ?? "open";
-    if (policy !== "open") {
-      const byProvider =
-        (policy === "provider" || policy === "provider-or-allowlist") &&
-        pre.provider !== undefined &&
-        facilitatorParties.has(pre.provider);
-      const byAllowlist =
-        (policy === "allowlist" || policy === "provider-or-allowlist") &&
-        (config.merchantAllowlist ?? []).includes(requirements.payTo);
-      if (!byProvider && !byAllowlist) {
-        return fail("invalid_exact_canton_merchant_not_registered", payer);
-      }
-    }
-    if (pre.validFrom !== undefined) {
-      const fromMs = Date.parse(pre.validFrom);
-      if (!Number.isFinite(fromMs) || fromMs > (nowMsOverride ?? Date.now())) {
-        return fail("invalid_exact_canton_preapproval_missing", payer);
-      }
-    }
-    const expiryMs = Date.parse(pre.expiresAt);
-    if (!Number.isFinite(expiryMs) || expiryMs <= (nowMsOverride ?? Date.now())) {
-      return fail("invalid_exact_canton_preapproval_missing", payer);
+  // Which merchants this facilitator relays for (it pays their traffic).
+  const policy = config.merchantPolicy ?? "open";
+  if (policy !== "open") {
+    const byProvider =
+      (policy === "provider" || policy === "provider-or-allowlist") &&
+      path.preapprovalProvider !== undefined &&
+      facilitatorParties.has(path.preapprovalProvider);
+    const byAllowlist =
+      (policy === "allowlist" || policy === "provider-or-allowlist") &&
+      (config.merchantAllowlist ?? []).includes(requirements.payTo);
+    if (!byProvider && !byAllowlist) {
+      return fail("invalid_exact_canton_merchant_not_registered", payer);
     }
   }
 
@@ -325,7 +265,6 @@ export async function verifyInlineTransfer(
   if (declaredExecuteBefore === undefined) {
     return fail("invalid_exact_canton_expired", payer);
   }
-  const nowMs = nowMsOverride ?? Date.now();
   if (declaredExecuteBefore <= nowMs + EXECUTE_BEFORE_MARGIN_MS) {
     return fail("invalid_exact_canton_expired", payer);
   }
@@ -334,31 +273,8 @@ export async function verifyInlineTransfer(
     return fail("invalid_exact_canton_execute_before_too_far", payer);
   }
 
-  // Rule 13, second half — declared inputs must cover the amount, IF this
-  // facilitator has an authoritative view of the payer's holdings.
-  let owned: Map<string, string> | undefined;
-  try {
-    owned = signer.fetchOwnedHoldingAmounts
-      ? await signer.fetchOwnedHoldingAmounts(payer)
-      : undefined;
-  } catch {
-    owned = undefined;
-  }
-  const authoritative = owned !== undefined && declaredInputs.every(cid => owned!.has(cid));
-  if (authoritative && owned) {
-    let total = 0n;
-    for (const cid of declaredInputs) {
-      const units = ledgerDecimalToAtomic(owned.get(cid) ?? "");
-      if (units === null) return fail("invalid_exact_canton_insufficient_inputs", payer);
-      total += units;
-    }
-    const needed = ledgerDecimalToAtomic(expectedAmount);
-    if (needed === null || total < needed) {
-      return fail("invalid_exact_canton_insufficient_inputs", payer);
-    }
-  }
-
-  // Rule 3 — signature, LAST and fail-closed.
+  // Rule 3 — signature, last and fail-closed. Verify reads nothing else from
+  // the network, so a payload error never surfaces as a ledger error.
   let proof: {
     verified: boolean;
     preparedTxHashHex?: string;
@@ -385,7 +301,11 @@ export async function verifyInlineTransfer(
     preparedTransactionBytes: decoded.preparedTransactionBytes,
     signatureB64: decoded.signatureB64,
     hashingSchemeVersion: decoded.hashingSchemeVersion,
-    transferKind: utilRegistry ? "registry" : "amulet",
+    transferKind: path.kind,
+    ...(pt.commandId !== undefined ? { commandId: pt.commandId } : {}),
+    ...(pt.maxLedgerEffectiveTime !== undefined
+      ? { maxLedgerTimeMs: Number(pt.maxLedgerEffectiveTime / 1000n) }
+      : {}),
     ...(proof.publishedProtocolKeys !== undefined
       ? { publishedProtocolKeys: proof.publishedProtocolKeys }
       : {}),

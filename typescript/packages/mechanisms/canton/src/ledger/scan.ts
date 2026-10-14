@@ -1,8 +1,7 @@
 /**
- * Scan / registry reads for the exact-scheme signer — the subset that resolves a
- * transfer factory (client prepare), detects a merchant's TransferPreapproval and
- * its expiry (facilitator settle gate), and reads a payer's owned Amulet holdings
- * (facilitator verify funding check).
+ * Scan / registry reads for the exact-scheme client — the subset that resolves a
+ * transfer factory (client prepare) and reads a merchant's TransferPreapproval
+ * and its expiry (merchant onboarding).
  *
  * Amulet (Canton Coin) reads route to the SV Scan; a non-Amulet CIP-56 token
  * whose `instrumentId.admin` maps to a DA Registry Utility base URL routes there
@@ -74,7 +73,6 @@ export class ScanClient {
   private readonly scanUrl: string;
   private readonly fallbackUrls: string[];
   private readonly isSv: boolean;
-  private acsSnapshotCache?: { at: number; migrationId: number; recordTime: string };
 
   /**
    * Construct a Scan / registry client.
@@ -198,92 +196,6 @@ export class ScanClient {
       ...(payload.validFrom !== undefined ? { validFrom: payload.validFrom } : {}),
       ...(payload.lastRenewedAt !== undefined ? { lastRenewedAt: payload.lastRenewedAt } : {}),
     };
-  }
-
-  /**
-   * Every Amulet a party owns, as contract-id → ledger-Decimal amount, from the
-   * public SV Scan ACS snapshot. LockedAmulet is excluded (not spendable), and
-   * the owner is re-checked per event so a response cannot inflate the total. A
-   * holding MISSING from the map is unknown-or-spent, never a zero — callers must
-   * treat that as a refusal, not as no contribution. SV flavor only.
-   *
-   * @param party - The party whose Amulet holdings to read.
-   * @returns A map of contract id → ledger-Decimal amount.
-   */
-  async getOwnedAmuletAmounts(party: string): Promise<Map<string, string>> {
-    if (!this.isSv) {
-      throw new CantonError("getOwnedAmuletAmounts needs the sv Scan flavor", "UNSUPPORTED");
-    }
-    const { migrationId, recordTime } = await this.latestAcsSnapshot();
-    const out = new Map<string, string>();
-    let after: unknown;
-    // Bounded: a party with more pages than this is far outside the payment path.
-    for (let page = 0; page < 20; page++) {
-      const body: Record<string, unknown> = {
-        migration_id: migrationId,
-        record_time: recordTime,
-        owner_party_ids: [party],
-        page_size: 500,
-      };
-      if (after !== undefined) body["after"] = after;
-      const res = await this.requestBases<{
-        created_events?: Array<{
-          contract_id?: string;
-          template_id?: string;
-          create_arguments?: { owner?: string; amount?: { initialAmount?: string } };
-        }>;
-        next_page_token?: unknown;
-      }>("POST", "/api/scan/v0/holdings/state", body, [this.scanUrl, ...this.fallbackUrls]);
-      for (const e of res.created_events ?? []) {
-        const cid = e.contract_id;
-        const amount = e.create_arguments?.amount?.initialAmount;
-        if (
-          typeof cid !== "string" ||
-          typeof amount !== "string" ||
-          !e.template_id?.endsWith(":Splice.Amulet:Amulet") ||
-          e.create_arguments?.owner !== party
-        ) {
-          continue;
-        }
-        out.set(cid, amount);
-      }
-      if (res.next_page_token === undefined || res.next_page_token === null) break;
-      after = res.next_page_token;
-    }
-    return out;
-  }
-
-  private async latestAcsSnapshot(): Promise<{ migrationId: number; recordTime: string }> {
-    const TTL_MS = 5 * 60_000;
-    const now = Date.now();
-    if (this.acsSnapshotCache && now - this.acsSnapshotCache.at < TTL_MS) {
-      return {
-        migrationId: this.acsSnapshotCache.migrationId,
-        recordTime: this.acsSnapshotCache.recordTime,
-      };
-    }
-    const before = new Date().toISOString();
-    let best: { migrationId: number; recordTime: string } | null = null;
-    // Probe migration ids and keep the LATEST record_time — after a migration
-    // both ids can answer, and the first would be a frozen pre-migration snapshot.
-    for (let id = 0; id <= 8; id++) {
-      try {
-        const r = await this.get<{ record_time?: string }>(
-          `/api/scan/v0/state/acs/snapshot-timestamp?before=${encodeURIComponent(
-            before,
-          )}&migration_id=${id}`,
-        );
-        if (typeof r.record_time !== "string") continue;
-        if (!best || r.record_time > best.recordTime) {
-          best = { migrationId: id, recordTime: r.record_time };
-        }
-      } catch {
-        /* a migration id that does not exist answers 404 — not this one */
-      }
-    }
-    if (!best) throw new CantonError("scan: no ACS snapshot available", "INVALID_RESPONSE");
-    this.acsSnapshotCache = { at: now, ...best };
-    return best;
   }
 
   private get<T>(path: string): Promise<T> {
