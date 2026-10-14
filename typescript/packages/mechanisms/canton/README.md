@@ -93,7 +93,9 @@ transaction's hash as `transaction`, and remembers the submission in a
 `PendingSettlementStore`. A retry of the same payload looks the submission up
 instead of relaying it again. The transaction cannot commit after its
 `executeBefore` plus the synchronizer's ledger-time tolerance, so once that has
-passed a submission that is still not on the ledger is reported as failed.
+passed a submission that is still not on the ledger is reported as failed. That
+absence is only provable on a participant that hosts the payer; elsewhere the
+answer stays `settlement_pending`.
 
 The default store is in-memory, per process, with a 5-minute TTL. A facilitator
 running several replicas should pass a shared store as `pendingSettlementStore`,

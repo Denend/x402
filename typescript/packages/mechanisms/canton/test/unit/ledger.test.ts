@@ -30,6 +30,7 @@ function service(over: Partial<TransferFactoryDeps["client"]> = {}) {
     pollCompletionUpdateId: async () => "1220-u",
     findCompletion: async () => ({ kind: "absent" }),
     findCommandUpdateId: async () => undefined,
+    isPartyLocal: async () => true,
     ...over,
   };
   return new TransferFactoryService({ client, userId: "u" });
@@ -161,8 +162,22 @@ describe("submission lookup", () => {
     expect(await svc.lookup(input)).toEqual({ status: "committed", updateId: "1220-first-relay" });
   });
 
-  it("nowhere on the ledger → absent", async () => {
+  it("nowhere on the ledger of a participant hosting the payer → absent", async () => {
     expect(await service().lookup(input)).toEqual({ status: "absent" });
+  });
+
+  it("a miss on a participant that does not host the payer proves nothing → unknown", async () => {
+    const svc = service({ isPartyLocal: async () => false });
+    expect(await svc.lookup(input)).toEqual({ status: "unknown" });
+  });
+
+  it("a failed hosting check → unknown", async () => {
+    const svc = service({
+      isPartyLocal: async () => {
+        throw new CantonError("forbidden", "HTTP_ERROR", 403);
+      },
+    });
+    expect(await svc.lookup(input)).toEqual({ status: "unknown" });
   });
 
   it("a failed ledger read → unknown, never absent", async () => {
@@ -172,6 +187,28 @@ describe("submission lookup", () => {
       },
     });
     expect(await svc.lookup(input)).toEqual({ status: "unknown" });
+  });
+});
+
+describe("isPartyLocal", () => {
+  const clientWith = (body: unknown) =>
+    new CantonClient({
+      participantUrl: "http://p.invalid",
+      token: "t",
+      fetch: (async () => new Response(JSON.stringify(body), { status: 200 })) as typeof fetch,
+    });
+
+  it("true only for the party itself reported as local", async () => {
+    expect(
+      await clientWith({ partyDetails: [{ party: PAYER, isLocal: true }] }).isPartyLocal(PAYER),
+    ).toBe(true);
+    expect(
+      await clientWith({ partyDetails: [{ party: PAYER, isLocal: false }] }).isPartyLocal(PAYER),
+    ).toBe(false);
+    expect(
+      await clientWith({ partyDetails: [{ party: "other", isLocal: true }] }).isPartyLocal(PAYER),
+    ).toBe(false);
+    expect(await clientWith({}).isPartyLocal(PAYER)).toBe(false);
   });
 });
 

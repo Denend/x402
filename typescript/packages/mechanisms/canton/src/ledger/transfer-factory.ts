@@ -40,6 +40,7 @@ export interface TransferFactoryDeps {
     | "pollCompletionUpdateId"
     | "findCompletion"
     | "findCommandUpdateId"
+    | "isPartyLocal"
   >;
   /** The ledger user the relay executes as (holds CanActAs on the payer party). */
   userId: string;
@@ -51,9 +52,10 @@ export type SubmissionLookup =
   | { status: "committed"; updateId: string }
   /** Definitely rejected: nothing moved. */
   | { status: "rejected" }
-  /** No completion, and no transaction carrying its command id up to the
-   *  participant's ledger end. Final only once the transaction can no longer be
-   *  recorded (see the facilitator scheme's settlement deadline). */
+  /** No completion, and no transaction carrying its command id up to the ledger
+   *  end of a participant that hosts the payer (so it sees all the payer's
+   *  transactions). Final only once the transaction can no longer be recorded
+   *  (see the facilitator scheme's settlement deadline). */
   | { status: "absent" }
   /** The ledger could not be read conclusively. */
   | { status: "unknown" };
@@ -148,8 +150,9 @@ export class TransferFactoryService {
   /**
    * Look up a submission whose outcome was not read. The completion stream is
    * checked first; when it has nothing, the payer's transactions from
-   * `beginOffset` to the ledger end are searched for the signed command id,
-   * which is a complete read of that range.
+   * `beginOffset` to the ledger end are searched for the signed command id. That
+   * search proves absence only on a participant that hosts the payer; elsewhere
+   * a miss stays unknown.
    *
    * @param input - The payer, submission id, signed command id and the offset
    *   read before submitting.
@@ -180,7 +183,9 @@ export class TransferFactoryService {
         input.commandId,
         input.beginOffset,
       );
-      return updateId ? { status: "committed", updateId } : { status: "absent" };
+      if (updateId) return { status: "committed", updateId };
+      const hostsPayer = await this.deps.client.isPartyLocal(input.payer);
+      return hostsPayer ? { status: "absent" } : { status: "unknown" };
     } catch {
       return { status: "unknown" };
     }

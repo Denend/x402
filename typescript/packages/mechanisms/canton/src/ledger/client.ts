@@ -248,6 +248,21 @@ export class CantonClient {
   }
 
   /**
+   * GET `/v2/parties/{party}` — whether `party` is hosted on this participant.
+   * Only then does the participant see every transaction of the party, so only
+   * then is the absence of one from its ledger meaningful.
+   *
+   * @param party - The party to look up.
+   * @returns True when the participant hosts the party.
+   */
+  async isPartyLocal(party: string): Promise<boolean> {
+    const res = await this.get<{ partyDetails?: Array<{ party?: string; isLocal?: boolean }> }>(
+      `/v2/parties/${encodeURIComponent(party)}`,
+    );
+    return (res.partyDetails ?? []).some(d => d.party === party && d.isLocal === true);
+  }
+
+  /**
    * POST `/v2/updates` over a closed offset range — the updateId of the
    * transaction that `party` submitted with `commandId`, if one was recorded
    * after `beginExclusive`. The range ends at the current ledger end, so the
