@@ -56,16 +56,6 @@ interface PendingSubmission {
   duplicate: boolean;
 }
 
-/** What settle remembers about a relay that committed, so a retry after a lost
- *  response gets the same answer instead of relaying again. */
-interface SettledSubmission {
-  kind: "settled";
-  updateId: string;
-  verifiedAtMs: number;
-}
-
-type StoredSubmission = PendingSubmission | SettledSubmission;
-
 /** Options for the Canton facilitator scheme. */
 export interface CantonFacilitatorOptions extends CantonSchemeConfig {
   /** The Global Synchronizer id this facilitator settles on, advertised in the
@@ -172,9 +162,6 @@ export class ExactCantonScheme implements SchemeNetworkFacilitator {
     if (earlier?.status === "unverifiable") {
       return this.pendingResponse(earlier.key, earlier.payer, network);
     }
-    if (earlier?.record.kind === "settled") {
-      return { success: true, payer: earlier.payer, transaction: earlier.record.updateId, network };
-    }
     if (earlier) return this.reconcile(earlier.key, earlier.record, earlier.payer, requirements);
 
     const v = await verifyInlineTransfer(payload, requirements, this.signer, this.options);
@@ -191,11 +178,9 @@ export class ExactCantonScheme implements SchemeNetworkFacilitator {
         hashingSchemeVersion: v.hashingSchemeVersion,
         submissionId,
       });
-      await this.remember(v.preparedTxHashHex, {
-        kind: "settled",
-        updateId: exec.updateId,
-        verifiedAtMs,
-      });
+      // A commit is not remembered: answering a later settle of the same payload
+      // from memory would make the payment replayable. That retry relays again,
+      // and the ledger answers it as a duplicate or a spend of archived inputs.
       return { success: true, payer: v.payer, transaction: exec.updateId, network };
     } catch (err) {
       if (!(err instanceof SubmissionOutcomeUnknownError)) {
@@ -236,7 +221,7 @@ export class ExactCantonScheme implements SchemeNetworkFacilitator {
     payload: PaymentPayload,
     requirements: PaymentRequirements,
   ): Promise<
-    | { status: "found"; key: string; record: StoredSubmission; payer: string }
+    | { status: "found"; key: string; record: PendingSubmission; payer: string }
     | { status: "unverifiable"; key: string; payer: string }
     | undefined
   > {
@@ -263,8 +248,8 @@ export class ExactCantonScheme implements SchemeNetworkFacilitator {
 
   /**
    * Resolve a relay that ended `settlement_pending`. The entry is removed first
-   * so a concurrent retry does not reconcile it twice, and re-recorded when the
-   * outcome is still open.
+   * so a concurrent retry does not reconcile it twice, and re-recorded only when
+   * the outcome is still open: a commit is answered as success exactly once.
    *
    * @param key - The prepared-transaction hash the relay is stored under.
    * @param record - What was remembered about the relay.
@@ -290,11 +275,7 @@ export class ExactCantonScheme implements SchemeNetworkFacilitator {
       beginOffset: record.beginOffset,
     });
     if (found.status === "committed") {
-      await this.remember(key, {
-        kind: "settled",
-        updateId: found.updateId,
-        verifiedAtMs: record.verifiedAtMs,
-      });
+      // Answered once; the entry stays deleted, so this commit is never served again.
       return { success: true, payer, transaction: found.updateId, network };
     }
     if (found.status === "rejected") {
@@ -318,7 +299,7 @@ export class ExactCantonScheme implements SchemeNetworkFacilitator {
    * @param key - The prepared-transaction hash.
    * @param record - What to remember.
    */
-  private async remember(key: string, record: StoredSubmission): Promise<void> {
+  private async remember(key: string, record: PendingSubmission): Promise<void> {
     try {
       await this.pendingStore.set(key, JSON.stringify(record));
     } catch {
@@ -379,19 +360,16 @@ export class ExactCantonScheme implements SchemeNetworkFacilitator {
  * Parse a stored entry, or undefined when it is not one.
  *
  * @param stored - The stored JSON.
- * @returns The pending or settled record.
+ * @returns The pending record.
  */
-function parseStored(stored: string): StoredSubmission | undefined {
-  let r: { [K in keyof PendingSubmission | keyof SettledSubmission]?: unknown };
+function parseStored(stored: string): PendingSubmission | undefined {
+  let r: { [K in keyof PendingSubmission]?: unknown };
   try {
     r = JSON.parse(stored) as typeof r;
   } catch {
     return undefined;
   }
   const isNumber = (n: unknown) => typeof n === "number" && Number.isFinite(n);
-  if (r.kind === "settled" && typeof r.updateId === "string" && isNumber(r.verifiedAtMs)) {
-    return r as unknown as SettledSubmission;
-  }
   if (
     r.kind === "pending" &&
     typeof r.submissionId === "string" &&

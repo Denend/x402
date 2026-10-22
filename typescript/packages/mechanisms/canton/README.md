@@ -102,8 +102,10 @@ instead of relaying it again. The transaction cannot commit after its
 passed a submission that is still not on the ledger is reported as failed. That
 absence is only provable on a participant that hosts the payer, and never after
 the participant reported the relay as a duplicate of an earlier one; otherwise
-the answer stays `settlement_pending`. A committed settlement is remembered too,
-so a retry after a lost response gets the same `updateId`.
+the answer stays `settlement_pending`. A commit is answered once and never
+remembered: a later settle of the same payload relays again and is refused by
+the ledger, so a settled payment header cannot be replayed for a second
+success. Delivering the resource once per payment is the resource server's job.
 
 The default store is in-memory, per process, with a 5-minute TTL. A facilitator
 running several replicas should pass a shared store as `pendingSettlementStore`,

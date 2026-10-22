@@ -429,9 +429,10 @@ The facilitator applies every verification rule, then:
      duplicate-command rejection: an earlier relay of the same transaction was
      accepted and may have committed before the range it searches.
 
-   A facilitator SHOULD also remember a committed settlement for the same
-   payload, so a retry after a lost response is answered with the same
-   `updateId` instead of relaying again.
+   A facilitator MUST NOT answer a settle from a remembered commit. A pending
+   submission resolved as committed is answered with success once and then
+   forgotten; any later settle of the same payload relays again, and the
+   ledger answers it as a duplicate or a spend of archived inputs.
 
 A failed settlement does not revoke the payer's signature: the signed transfer
 stays executable until its `executeBefore`, whoever holds it. Clients SHOULD keep

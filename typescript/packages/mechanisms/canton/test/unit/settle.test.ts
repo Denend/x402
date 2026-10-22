@@ -219,10 +219,8 @@ describe("settle retry after settlement_pending", () => {
         beginOffset: 77,
       }),
     ]);
-    expect(JSON.parse((await store.get(HASH))!)).toMatchObject({
-      kind: "settled",
-      updateId: "1220-c",
-    });
+    // Answered once, then forgotten: the commit is never served again.
+    expect(await store.get(HASH)).toBeUndefined();
   });
 
   it("reconciles even after the transfer's executeBefore has passed", async () => {
@@ -300,15 +298,77 @@ describe("settle retry after settlement_pending", () => {
     expect((await scheme(second.s).settle(payload(), reqs)).errorReason).toBe("settlement_pending");
   });
 
-  it("answers a retry after a lost success response from memory, without relaying again", async () => {
+  it("a second settle of a committed payload relays again and is not a success", async () => {
     const store = new InMemoryPendingSettlementStore();
     const first = signer();
     const opts = { networks: [NETWORK], pendingSettlementStore: store };
     expect((await new ExactCantonScheme(first.s, opts).settle(payload(), reqs)).success).toBe(true);
-    const second = signer();
+    expect(await store.get(HASH)).toBeUndefined();
+    // The ledger refuses the replay: its inputs are already archived.
+    let relays = 0;
+    const second = signer({
+      executeSubmission: async () => {
+        relays++;
+        throw new Error("INACTIVE_CONTRACTS");
+      },
+    });
     const r = await new ExactCantonScheme(second.s, opts).settle(payload(), reqs);
-    expect(r).toMatchObject({ success: true, transaction: "1220-settled" });
-    expect(second.executed).toHaveLength(0);
+    expect(r.success).toBe(false);
+    expect(relays).toBe(1);
+  });
+
+  it("a pending relay found committed answers success once, then never again", async () => {
+    const store = new InMemoryPendingSettlementStore();
+    const opts = {
+      networks: [NETWORK],
+      pendingSettlementStore: store,
+      ledgerTimeToleranceMs: TOLERANCE_MS,
+    };
+    await new ExactCantonScheme(signer({ executeSubmission: unknownOutcome }).s, opts).settle(
+      payload(),
+      reqs,
+    );
+    vi.setSystemTime(PREPARED_AT_MS + 5_000);
+    const committed = signer({
+      lookupSubmission: async () => ({ status: "committed", updateId: "1220-c" }),
+    });
+    const scheme = new ExactCantonScheme(committed.s, opts);
+    expect(await scheme.settle(payload(), reqs)).toMatchObject({ success: true });
+    // A later retry is not answered from the commit: it relays, and a duplicate
+    // stays pending instead of becoming a second success.
+    let relays = 0;
+    const dup = signer({
+      executeSubmission: async () => {
+        relays++;
+        throw new SubmissionOutcomeUnknownError(new Error("409"), 900, true);
+      },
+      lookupSubmission: async () => ({ status: "absent" }),
+    });
+    const r = await new ExactCantonScheme(dup.s, opts).settle(payload(), reqs);
+    expect(r).toMatchObject({ success: false, errorReason: "settlement_pending" });
+    expect(relays).toBe(1);
+  });
+
+  it("a settled record left in a shared store by an older version is ignored", async () => {
+    const store = new InMemoryPendingSettlementStore();
+    await store.set(
+      HASH,
+      JSON.stringify({ kind: "settled", updateId: "1220-old", verifiedAtMs: 1 }),
+    );
+    let relays = 0;
+    const { s } = signer({
+      executeSubmission: async () => {
+        relays++;
+        throw new Error("INACTIVE_CONTRACTS");
+      },
+    });
+    const r = await new ExactCantonScheme(s, {
+      networks: [NETWORK],
+      pendingSettlementStore: store,
+    }).settle(payload(), reqs);
+    expect(r.success).toBe(false);
+    expect(r.transaction).not.toBe("1220-old");
+    expect(relays).toBe(1);
   });
 
   it("stays pending when the retry cannot re-verify for a ledger read failure", async () => {
