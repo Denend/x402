@@ -454,9 +454,11 @@ export class CantonClient {
       createdEvent?: CreatedEvent;
     };
     type AcsResponse = AcsEntry[] | { contractEntries?: AcsEntry[] };
+    // `eventFormat`, not the top-level `filter` + `verbose`: Canton 3.6 rejects
+    // those deprecated fields with 400 and 3.7 removes them. eventFormat is
+    // accepted since 3.3.
     const response = await this.post<AcsResponse>("/v2/state/active-contracts", {
-      filter,
-      verbose: false,
+      eventFormat: { ...filter, verbose: false },
       activeAtOffset: end.offset,
     });
     const entries: AcsEntry[] = Array.isArray(response)

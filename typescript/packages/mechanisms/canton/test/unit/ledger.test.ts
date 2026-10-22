@@ -227,6 +227,26 @@ describe("isPartyLocal", () => {
   });
 });
 
+describe("queryActiveContracts", () => {
+  it("sends the filter in eventFormat, never the top-level filter/verbose Canton 3.6 rejects", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const client = new CantonClient({
+      participantUrl: "http://p.invalid",
+      token: "t",
+      fetch: (async (url: string, init?: RequestInit) => {
+        if (url.endsWith("/v2/state/ledger-end")) {
+          return new Response(JSON.stringify({ offset: 9 }), { status: 200 });
+        }
+        bodies.push(JSON.parse(String(init?.body)));
+        return new Response("[]", { status: 200 });
+      }) as typeof fetch,
+    });
+    const filter = { filtersByParty: { [PAYER]: { cumulative: [] } } };
+    await client.queryActiveContracts(filter);
+    expect(bodies).toEqual([{ eventFormat: { ...filter, verbose: false }, activeAtOffset: 9 }]);
+  });
+});
+
 describe("findCommandUpdateId", () => {
   function clientWith(end: number, updates: unknown, status = 200) {
     const bodies: unknown[] = [];
