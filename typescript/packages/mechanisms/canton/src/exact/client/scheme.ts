@@ -11,7 +11,7 @@ import type { PaymentPayload, PaymentRequirements, SchemeNetworkClient } from "@
 import { assertPreparedTransferMatches } from "../../prepared-transfer.js";
 import { encodeInlinePaymentPayload } from "../../inline-payload.js";
 import { wireAmountToLedgerDecimal } from "../../amount.js";
-import { findDefaultAsset } from "../../defaultAssets.js";
+import { CANTON_COIN_ASSET, findDefaultAsset } from "../../defaultAssets.js";
 import type { ClientCantonSigner, CantonSchemeConfig } from "../../signer.js";
 
 /** Client-side `exact` scheme for Canton networks. */
@@ -56,6 +56,7 @@ export class ExactCantonScheme implements SchemeNetworkClient {
         "paymentRequirements.extra.instrumentId {admin,id} is required for the Canton exact scheme",
       );
     }
+    assertAssetNamesInstrument(paymentRequirements, { admin, id });
 
     // Wire amount is atomic integer units; the ledger transfer carries a Decimal.
     const amount = wireAmountToLedgerDecimal(
@@ -108,5 +109,37 @@ export class ExactCantonScheme implements SchemeNetworkClient {
     // Spread into a plain record: the wire type is a fixed-key interface, and the
     // base `payload` field is `Record<string, unknown>`.
     return { x402Version, payload: { ...payload } };
+  }
+}
+
+/**
+ * `asset` must name the instrument actually paid (`extra.instrumentId`). Spend
+ * controls (asset allowlist, per-payment cap) key on `asset`, so a 402 naming
+ * one asset while paying another would slip past them. Accepted forms: the
+ * structured `<admin>::<id>` (exact match), Canton Coin's symbol (instrument
+ * `Amulet`), or a registry token's symbol (its instrument id).
+ *
+ * @param req - The payment requirements.
+ * @param instrumentId - The instrument from `extra.instrumentId`.
+ * @param instrumentId.admin - The instrument admin party.
+ * @param instrumentId.id - The instrument id.
+ * @throws When `asset` names a different instrument.
+ */
+function assertAssetNamesInstrument(
+  req: PaymentRequirements,
+  instrumentId: { admin: string; id: string },
+): void {
+  const { asset } = req;
+  const structured = `${instrumentId.admin}::${instrumentId.id}`;
+  let matches = asset === instrumentId.id;
+  if (asset.includes("::")) matches = asset === structured;
+  else if (findDefaultAsset(asset, req.network) === CANTON_COIN_ASSET) {
+    matches = instrumentId.id === "Amulet";
+  }
+  if (!matches) {
+    throw new Error(
+      `paymentRequirements.asset "${asset}" does not name extra.instrumentId ` +
+        `("${structured}")`,
+    );
   }
 }

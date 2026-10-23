@@ -99,4 +99,37 @@ describe("client createPaymentPayload", () => {
       new ExactCantonScheme(s).createPaymentPayload(2, reqs({ instrumentId: undefined })),
     ).rejects.toThrow(/instrumentId/);
   });
+
+  describe("asset must name extra.instrumentId", () => {
+    const USDCX = { admin: "usdcx-registrar::1220" + "11".repeat(32), id: "USDCx" };
+
+    it("signs when the structured asset matches", async () => {
+      const { s } = signer();
+      const r = reqs({}, { asset: `${CC.instrumentId.admin}::${CC.instrumentId.id}` });
+      await expect(new ExactCantonScheme(s).createPaymentPayload(2, r)).resolves.toBeDefined();
+    });
+
+    it("lets a registry symbol through to prepare when it is the instrument id", async () => {
+      const { s, asked } = signer();
+      await new ExactCantonScheme(s)
+        .createPaymentPayload(2, reqs({ instrumentId: USDCX }, { asset: "USDCx" }))
+        .catch(() => undefined);
+      expect(asked).toHaveLength(1);
+    });
+
+    it.each([
+      ["CC naming a registry token", "CC", USDCX],
+      ["canton-coin naming a registry token", "canton-coin", USDCX],
+      ["a registry symbol naming Amulet", "USDCx", undefined],
+      ["a structured asset with another admin", "wrong::1220::Amulet", undefined],
+      ["a structured asset with another id", `${USDCX.admin}::CBTC`, USDCX],
+    ])("refuses %s before preparing", async (_label, asset, instrumentId) => {
+      const { s, asked } = signer();
+      const r = reqs(instrumentId ? { instrumentId } : {}, { asset });
+      await expect(new ExactCantonScheme(s).createPaymentPayload(2, r)).rejects.toThrow(
+        /does not name extra\.instrumentId/,
+      );
+      expect(asked).toHaveLength(0);
+    });
+  });
 });
